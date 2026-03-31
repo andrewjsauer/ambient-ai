@@ -113,7 +113,7 @@ _ambient_precmd() {
 
     # Build log file path
     local date_str
-    date_str=$(date +%Y-%m-%d)
+    strftime -s date_str "%Y-%m-%d" "${EPOCHREALTIME%.*}"
     local log_file="${_AMBIENT_LOG_DIR}/events-${date_str}.jsonl"
 
     # Escape command and cwd for JSON

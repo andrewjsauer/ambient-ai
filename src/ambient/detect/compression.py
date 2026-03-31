@@ -51,18 +51,18 @@ def _dedup_subsequences(
     sorted_seqs = sorted(counts.keys(), key=len, reverse=True)
     suppressed: set[tuple[str, ...]] = set()
 
-    for i, short_seq in enumerate(sorted_seqs):
-        if short_seq in suppressed:
+    for candidate in sorted_seqs:
+        if candidate in suppressed:
             continue
-        for long_seq in sorted_seqs:
-            if long_seq in suppressed:
+        for container in sorted_seqs:
+            if container in suppressed:
                 continue
-            if len(long_seq) <= len(short_seq):
+            if len(container) <= len(candidate):
                 continue
-            if _is_subsequence(short_seq, long_seq):
+            if _is_subsequence(candidate, container):
                 # Suppress the shorter if the longer covers enough of its occurrences
-                if counts[long_seq] / counts[short_seq] >= ratio_threshold:
-                    suppressed.add(short_seq)
+                if counts[container] / counts[candidate] >= ratio_threshold:
+                    suppressed.add(candidate)
                     break
 
     return {seq: count for seq, count in counts.items() if seq not in suppressed}

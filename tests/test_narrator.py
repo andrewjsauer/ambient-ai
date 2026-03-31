@@ -148,3 +148,23 @@ def test_narrate_daily(mock_api, config):
     from datetime import datetime
     date_str = datetime.now().strftime("%Y-%m-%d")
     assert config.summary_path(date_str).exists()
+
+
+@patch("ambient.present.narrator._call_api")
+def test_narrate_daily_respects_date_param(mock_api, config):
+    mock_api.return_value = "Summary for a past date."
+
+    result = narrate_daily(
+        batch_analyses=[{"summary": "window 1"}],
+        changepoints=None,
+        config=config,
+        date_str="2026-03-29",
+    )
+
+    assert "past date" in result
+    # Should save to the specified date, not today
+    assert config.summary_path("2026-03-29").exists()
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    if today != "2026-03-29":
+        assert not config.summary_path(today).exists()

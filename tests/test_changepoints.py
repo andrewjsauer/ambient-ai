@@ -4,7 +4,7 @@ import pytest
 from ambient.capture.reader import Event
 from ambient.config import Config
 from ambient.detect.changepoints import detect_changepoints, _categorize_command
-from ambient.detect.pauses import PauseFindings
+from ambient.detect.pauses import PauseClassification, PauseFindings
 
 
 def _make_events_at_rate(
@@ -133,6 +133,45 @@ def test_categorize_commands():
     assert _categorize_command("claude") == "claude"
     assert _categorize_command("python run.py") == "other"
     assert _categorize_command("make build") == "build"
+
+
+def test_pause_attribution_by_timestamp_not_command_text(config):
+    """Same command in two segments — pauses should be attributed by timestamp, not text."""
+    base_ts = 1_000_000_000_000
+    # Two segments both using "git status" as a command
+    seg1 = _make_events_at_rate(base_ts, 60, 8, "git status")
+    seg2 = _make_events_at_rate(base_ts + 120 * 60_000, 60, 8, "git status")
+    # Gap between segments (low-rate period to force a changepoint)
+    gap = _make_events_at_rate(base_ts + 60 * 60_000, 60, 1, "vim file")
+
+    events = seg1 + gap + seg2
+
+    # Create pause findings with timestamps only in segment 2's range
+    seg2_start = base_ts + 120 * 60_000
+    pause_findings = PauseFindings(
+        available=True,
+        classifications=[
+            PauseClassification(
+                gap_ms=50000, label="stuck",
+                probabilities={"routine": 0.05, "evaluating": 0.1, "stuck": 0.85},
+                preceding_command="git status", following_command="git status",
+                ts_start=seg2_start + 5 * 60_000,  # clearly in segment 2
+            ),
+        ],
+    )
+
+    result = detect_changepoints(events, config, pause_findings=pause_findings)
+
+    # The stuck pause should only appear in the segment covering seg2's time range
+    for seg in result.segments:
+        if seg.start_ts <= seg2_start and seg.end_ts < seg2_start + 30 * 60_000:
+            # This is segment 1 — should NOT have stuck pauses
+            if seg.pause_distribution:
+                assert seg.pause_distribution.get("stuck", 0) == 0
+        elif seg.start_ts >= seg2_start:
+            # This is segment 2 — should have stuck pauses
+            if seg.pause_distribution:
+                assert seg.pause_distribution.get("stuck", 0) > 0
 
 
 def test_simulated_workday(config):

@@ -85,6 +85,7 @@ def narrate_daily(
     batch_analyses: list[dict],
     changepoints: ChangepointFindings | None,
     config: Config,
+    date_str: str | None = None,
 ) -> str:
     changepoint_dict = _findings_to_dict(changepoints) if changepoints else None
     prompt = build_daily_prompt(batch_analyses, changepoint_dict)
@@ -101,7 +102,8 @@ def narrate_daily(
 
     # Save summary
     config.ensure_dirs()
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    if date_str is None:
+        date_str = datetime.now().strftime("%Y-%m-%d")
     summary_path = config.summary_path(date_str)
     summary_path.write_text(narrative)
 

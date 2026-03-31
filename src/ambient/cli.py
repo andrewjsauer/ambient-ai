@@ -37,23 +37,22 @@ def cmd_status(config: Config, args):
     events_path = config.events_path(date_str)
 
     if events_path.exists():
+        lines = 0
+        last_line = None
         with open(events_path) as f:
-            lines = sum(1 for line in f if line.strip())
-        # Read last event timestamp
-        with open(events_path) as f:
-            last_line = None
             for line in f:
                 if line.strip():
+                    lines += 1
                     last_line = line
-            if last_line:
-                try:
-                    last_event = json.loads(last_line)
-                    last_ts = last_event.get("ts_end", 0)
-                    last_time = datetime.fromtimestamp(last_ts / 1000).strftime("%H:%M:%S")
-                except (json.JSONDecodeError, KeyError):
-                    last_time = "unknown"
-            else:
+        if last_line:
+            try:
+                last_event = json.loads(last_line)
+                last_ts = last_event.get("ts_end", 0)
+                last_time = datetime.fromtimestamp(last_ts / 1000).strftime("%H:%M:%S")
+            except (json.JSONDecodeError, KeyError):
                 last_time = "unknown"
+        else:
+            last_time = "unknown"
         print(f"Events today: {lines}")
         print(f"Last event: {last_time}")
     else:
@@ -196,7 +195,7 @@ def cmd_summary(config: Config, args):
     changepoints = detect_changepoints(events, config, pause_result)
 
     print(f"Generating daily summary for {date_str}...")
-    narrative = narrate_daily(batch_analyses, changepoints, config)
+    narrative = narrate_daily(batch_analyses, changepoints, config, date_str=date_str)
     print(f"\n{narrative}")
     print(f"\nSaved to: {config.summary_path(date_str)}")
 

@@ -21,6 +21,7 @@ class PauseClassification:
     probabilities: dict[str, float]
     preceding_command: str
     following_command: str
+    ts_start: int = 0
 
 
 @dataclass
@@ -173,6 +174,7 @@ def classify(events: list[Event], config: Config) -> PauseFindings:
                 probabilities=prob_dict,
                 preceding_command=preceding,
                 following_command=following,
+                ts_start=event.ts_start,
             )
         )
 

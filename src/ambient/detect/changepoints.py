@@ -191,13 +191,12 @@ def _build_segment(
     else:
         dominant_category = "other"
 
-    # Pause distribution (optional) — filter to pauses matching this segment's commands
+    # Pause distribution (optional) — filter to pauses within this segment's time range
     pause_dist = None
     if pause_findings and pause_findings.available and pause_findings.classifications:
-        segment_commands = {e.command for e in events}
         relevant_pauses = [
             c for c in pause_findings.classifications
-            if c.following_command in segment_commands
+            if start_ts <= c.ts_start <= end_ts
         ]
         if relevant_pauses:
             label_counts = Counter(c.label for c in relevant_pauses)
