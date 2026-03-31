@@ -75,6 +75,38 @@ launchd agents don't inherit shell environment variables. The daemon solves this
 
 Saved atomically (write to temp file, then `os.replace`). Handles corrupt/missing state gracefully (defaults to empty state on the next tick).
 
+## Structured Daily Summaries
+
+Daily summaries use a fixed template with 8 sections, inspired by Claude Code's session memory system. This makes summaries consistent across days and machine-parseable for future longitudinal analysis.
+
+```markdown
+## Day Title
+_A distinctive 5-10 word summary of this workday._
+
+## Rhythm Profile
+_When were you most focused vs most fragmented?_
+
+## Automation Candidates
+_Top 3 repeated command sequences, ranked by time saved._
+
+## Cognitive Load
+_Stuck episodes, routine vs evaluating vs stuck ratio._
+
+## Workflow Phases
+_Chronological phases with dominant activity type._
+
+## Friction Points
+_Failed commands, retries, longest stuck episodes._
+
+## Key Stats
+_Event count, session count, command rate, stuck count._
+
+## Actionable Insight
+_One specific suggestion for tomorrow._
+```
+
+Each section's italic description is preserved in the output as a structural anchor. Sections are left blank when insufficient data exists.
+
 ## CLI Commands
 
 | Command | What it does |

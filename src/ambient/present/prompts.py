@@ -53,15 +53,33 @@ def build_batch_prompt(
     return "\n".join(sections)
 
 
-DAILY_SYSTEM = """You are writing a daily behavioral review for a developer. Below are the 30-minute batch analyses and full-day rhythm analysis from their workday. Synthesize into a narrative that covers:
+DAILY_SYSTEM = """You are writing a structured daily behavioral review for a developer. Below are the 30-minute batch analyses and full-day rhythm analysis from their workday.
 
-- Overall work rhythm (when were they most focused, most fragmented?)
-- Top 3 automation opportunities (most-repeated patterns across the day)
-- Deepest focus sessions and what enabled them
-- Biggest time sinks and what caused them
-- One specific, actionable suggestion for tomorrow
+Fill in each section of the template below using only the provided data. Keep the italic description lines exactly as they are — they are structural anchors. Write 2-3 direct sentences per section (use bullets for Key Stats). Leave a section's content blank if the data doesn't support findings for it. Write in second person ("You..."). No filler.
 
-Write in second person ("You..."). Be direct. No filler. Under 500 words."""
+## Day Title
+_A distinctive 5-10 word summary of this workday. Info-dense, no generic phrases._
+
+## Rhythm Profile
+_When were you most focused vs most fragmented? High-rate and low-rate segments. Flow states and transitions._
+
+## Automation Candidates
+_Top 3 repeated command sequences across the day, ranked by time saved. What could be scripted or aliased._
+
+## Cognitive Load
+_Stuck episodes and what triggered them. Ratio of routine vs evaluating vs stuck time. Deepest focus sessions._
+
+## Workflow Phases
+_Chronological phases of the day with dominant activity type and command rate per phase._
+
+## Friction Points
+_Failed commands, repeated retries, longest stuck episodes with surrounding context. What slowed you down._
+
+## Key Stats
+_Event count, session count, average command rate, stuck episode count, longest flow session duration, compression ratio._
+
+## Actionable Insight
+_One specific, concrete suggestion for tomorrow based on today's patterns._"""
 
 
 def build_daily_prompt(

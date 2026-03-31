@@ -7,7 +7,7 @@ from ambient.config import Config
 from ambient.detect.compression import CompressionFindings, RepeatedSequence
 from ambient.detect.pauses import PauseFindings, PauseClassification
 from ambient.present.narrator import narrate_batch, narrate_daily, load_batch_analyses
-from ambient.present.prompts import build_batch_prompt, build_daily_prompt
+from ambient.present.prompts import build_batch_prompt, build_daily_prompt, DAILY_SYSTEM
 
 
 @pytest.fixture
@@ -72,6 +72,23 @@ def test_batch_prompt_without_pauses():
     )
     assert "Not available" in prompt
     assert "None found" in prompt
+
+
+def test_daily_system_has_structured_template():
+    sections = [
+        "## Day Title",
+        "## Rhythm Profile",
+        "## Automation Candidates",
+        "## Cognitive Load",
+        "## Workflow Phases",
+        "## Friction Points",
+        "## Key Stats",
+        "## Actionable Insight",
+    ]
+    for section in sections:
+        assert section in DAILY_SYSTEM, f"Missing section: {section}"
+    # Each section has an italic description
+    assert DAILY_SYSTEM.count("_") >= 16  # at least 8 pairs of underscores
 
 
 def test_daily_prompt_with_changepoints():
