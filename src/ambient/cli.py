@@ -242,6 +242,94 @@ def cmd_calibrate(config: Config, args):
         print(f"\n{result.reason}")
 
 
+def cmd_daemon_tick(config: Config, args):
+    from ambient.daemon.tick import daemon_tick
+    daemon_tick(config)
+
+
+def cmd_daemon_start(config: Config, args):
+    from ambient.daemon.launchd import install_agent, is_agent_loaded
+
+    config.ensure_dirs()
+
+    # Copy API key to dotenv for launchd context
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("Error: ANTHROPIC_API_KEY not set in current environment.", file=sys.stderr)
+        print("Set your API key first, then run 'ambient daemon-start'.")
+        sys.exit(1)
+
+    # Always write current key (handles rotation)
+    config.dotenv_path.write_text(f"ANTHROPIC_API_KEY={api_key}\n")
+    os.chmod(config.dotenv_path, 0o600)
+
+    if is_agent_loaded():
+        print("Daemon is already running. Use 'ambient daemon-stop' first to restart.")
+        return
+
+    install_agent(config)
+    print("Ambient daemon started.")
+    print(f"  Analysis runs every 30 minutes")
+    print(f"  API key saved to: {config.dotenv_path}")
+    print(f"  Daemon log: {config.daemon_log_path}")
+    print(f"\nTo stop: ambient daemon-stop")
+
+
+def cmd_daemon_stop(config: Config, args):
+    from ambient.daemon.launchd import is_agent_loaded, uninstall_agent
+
+    if not is_agent_loaded():
+        print("Daemon is not running.")
+        return
+
+    uninstall_agent()
+    print("Ambient daemon stopped.")
+
+
+def cmd_daemon_status(config: Config, args):
+    from ambient.daemon.launchd import is_agent_loaded
+    from ambient.daemon.lock import is_locked
+    from ambient.daemon.state import DaemonState
+
+    loaded = is_agent_loaded()
+    print(f"Daemon: {'running' if loaded else 'not running'}")
+
+    state = DaemonState.load(config.state_path)
+
+    if state.last_analyzed_ts > 0:
+        last_time = datetime.fromtimestamp(state.last_analyzed_ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"Last analysis: {last_time}")
+    else:
+        print("Last analysis: never")
+
+    if state.last_summary_date:
+        print(f"Last summary: {state.last_summary_date}")
+    else:
+        print("Last summary: never")
+
+    if state.last_calibration_date:
+        print(f"Last calibration: {state.last_calibration_date}")
+    else:
+        print("Last calibration: never")
+
+    print(f"Events since calibration: {state.events_since_calibration}")
+
+    locked, lock_info = is_locked(config.lock_path)
+    if locked:
+        print(f"Lock: held by PID {lock_info.get('pid', '?')} ({lock_info.get('age_minutes', 0):.0f}m)")
+    else:
+        print("Lock: free")
+
+    # Event count since last analysis
+    today = datetime.now().strftime("%Y-%m-%d")
+    events_path = config.events_path(today)
+    if events_path.exists():
+        lines = sum(1 for line in open(events_path) if line.strip())
+        print(f"Events today: {lines}")
+    else:
+        print("Events today: 0")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="ambient",
@@ -266,6 +354,12 @@ def main():
 
     subparsers.add_parser("calibrate", help="Fit GMM on accumulated event data")
 
+    # Daemon commands (flat, matching existing pattern)
+    subparsers.add_parser("daemon-tick", help=argparse.SUPPRESS)  # hidden launchd entry point
+    subparsers.add_parser("daemon-start", help="Start the background analysis daemon")
+    subparsers.add_parser("daemon-stop", help="Stop the background analysis daemon")
+    subparsers.add_parser("daemon-status", help="Show daemon status")
+
     args = parser.parse_args()
     config = Config()
 
@@ -278,6 +372,10 @@ def main():
         "summary": cmd_summary,
         "review": cmd_review,
         "calibrate": cmd_calibrate,
+        "daemon-tick": cmd_daemon_tick,
+        "daemon-start": cmd_daemon_start,
+        "daemon-stop": cmd_daemon_stop,
+        "daemon-status": cmd_daemon_status,
     }
 
     if args.command in commands:

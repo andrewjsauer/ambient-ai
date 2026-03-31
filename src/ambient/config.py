@@ -40,6 +40,9 @@ class Config:
     # Analysis
     default_window_minutes: int = 30
 
+    # Daemon
+    daemon_dir: Path = field(default=None)
+
     def __post_init__(self):
         if self.logs_dir is None:
             self.logs_dir = self.base_dir / "logs"
@@ -47,11 +50,14 @@ class Config:
             self.analysis_dir = self.base_dir / "analysis"
         if self.models_dir is None:
             self.models_dir = self.base_dir / "models"
+        if self.daemon_dir is None:
+            self.daemon_dir = self.base_dir / "daemon"
 
     def ensure_dirs(self):
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.analysis_dir.mkdir(parents=True, exist_ok=True)
         self.models_dir.mkdir(parents=True, exist_ok=True)
+        self.daemon_dir.mkdir(parents=True, exist_ok=True)
 
     def events_path(self, date_str: str) -> Path:
         return self.logs_dir / f"events-{date_str}.jsonl"
@@ -65,3 +71,19 @@ class Config:
     @property
     def gmm_model_path(self) -> Path:
         return self.models_dir / "gmm.joblib"
+
+    @property
+    def lock_path(self) -> Path:
+        return self.daemon_dir / "daemon.lock"
+
+    @property
+    def state_path(self) -> Path:
+        return self.daemon_dir / "state.json"
+
+    @property
+    def daemon_log_path(self) -> Path:
+        return self.daemon_dir / "daemon.log"
+
+    @property
+    def dotenv_path(self) -> Path:
+        return self.base_dir / ".env"
