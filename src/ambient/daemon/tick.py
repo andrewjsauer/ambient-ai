@@ -145,38 +145,41 @@ def daemon_tick(config: Config) -> None:
 
     # Gate 2: New events
     events = _get_new_events(config, state)
-    if not events:
-        logger.info("No new events since cursor, skipping analysis")
-        # Still check summaries and recalibration even without new events
-        _check_summaries(config, state)
-        state.save(config.state_path)
-        return
 
-    # Gate 3: Lock
+    # Gate 3: Lock (acquire before any work, including summary catch-up)
     if not acquire_lock(config.lock_path):
         logger.info("Lock held by another process, skipping")
         return
 
     try:
-        # Run analysis
-        logger.info("Analyzing %d events", len(events))
-        result = _run_analysis(config, events)
+        if not events:
+            logger.info("No new events since cursor, skipping analysis")
+        else:
+            # Run analysis
+            logger.info("Analyzing %d events", len(events))
+            _run_analysis(config, events)
 
-        # Update cursor (exclusive: +1 so boundary event isn't re-read)
-        latest_ts = max(e.ts_start for e in events)
-        state.last_analyzed_ts = latest_ts + 1
-        state.events_since_calibration += len(events)
+            # Update cursor (exclusive: +1 so boundary event isn't re-read)
+            latest_ts = max(e.ts_start for e in events)
+            state.last_analyzed_ts = latest_ts + 1
+            state.events_since_calibration += len(events)
 
-        # Save state immediately after cursor update (before summaries/recal)
-        state.save(config.state_path)
+            # Save state immediately after cursor update
+            state.save(config.state_path)
 
-        # Check for missing summaries
-        _check_summaries(config, state)
+        # Check for missing summaries (runs with or without new events)
+        try:
+            _check_summaries(config, state)
+        except Exception as e:
+            logger.error("Summary catch-up failed: %s", e)
 
-        # Check recalibration
-        _check_recalibration(config, state)
+        # Check recalibration (only meaningful when events were processed)
+        try:
+            _check_recalibration(config, state)
+        except Exception as e:
+            logger.error("Recalibration failed: %s", e)
 
-        # Save state again (summaries/recal may have updated it)
+        # Save state (summaries/recal may have updated it)
         state.save(config.state_path)
 
         logger.info("Daemon tick completed successfully")

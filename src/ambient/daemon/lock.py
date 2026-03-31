@@ -9,7 +9,7 @@ def acquire_lock(lock_path: Path) -> bool:
     """Write current PID to lock file and return True on success.
 
     If lock exists and is held by a live process, return False.
-    If lock exists but mtime > 60 minutes AND PID is dead, break stale lock.
+    If lock exists and the PID is dead, break the lock and acquire.
     If lock file contains invalid content, treat as stale (acquirable).
     """
     if lock_path.exists():
