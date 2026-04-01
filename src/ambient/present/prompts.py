@@ -93,8 +93,8 @@ _Failed commands, repeated retries, longest stuck episodes with surrounding cont
 ## Key Stats
 _Event count, session count, average command rate, stuck episode count, longest flow session duration, compression ratio._
 
-## Actionable Insight
-_One specific, concrete suggestion for tomorrow based on today's patterns._"""
+## Recommendations
+_1-3 concrete, copy-pasteable fixes for patterns detected today. Each recommendation must: (1) cite the specific pattern that triggered it, (2) include a code block with the artifact. Artifact types: shell aliases for repeated command sequences, git hooks for pre-push/pre-commit patterns, CLAUDE.md additions for Claude session friction, workflow scripts for multi-step patterns. If no strong patterns exist, include one actionable suggestion instead._"""
 
 
 def build_daily_prompt(

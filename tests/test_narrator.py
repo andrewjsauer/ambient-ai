@@ -83,7 +83,7 @@ def test_daily_system_has_structured_template():
         "## Workflow Phases",
         "## Friction Points",
         "## Key Stats",
-        "## Actionable Insight",
+        "## Recommendations",
     ]
     for section in sections:
         assert section in DAILY_SYSTEM, f"Missing section: {section}"

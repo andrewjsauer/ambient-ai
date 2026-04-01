@@ -121,8 +121,8 @@ _Failed commands, retries, longest stuck episodes._
 ## Key Stats
 _Event count, session count, command rate, stuck count._
 
-## Actionable Insight
-_One specific suggestion for tomorrow._
+## Recommendations
+_1-3 concrete fixes: shell aliases, git hooks, CLAUDE.md snippets, scripts._
 ```
 
 Each section's italic description is preserved in the output as a structural anchor. Sections are left blank when insufficient data exists.
