@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from datetime import datetime, timedelta
@@ -55,7 +56,11 @@ def _ingest_claude_sessions(config: Config, state: DaemonState) -> None:
     sessions = group_into_sessions(entries)
     completed, _ = filter_completed_sessions(sessions)
 
+    # Always advance cursor after reading, even if no sessions completed yet
+    state.last_claude_history_line = max(new_line_count, state.last_claude_history_line)
+
     if not completed:
+        state.save(config.state_path)
         return
 
     config.ensure_dirs()
@@ -63,12 +68,10 @@ def _ingest_claude_sessions(config: Config, state: DaemonState) -> None:
         event_dict = session_to_event(session)
         date_str = datetime.fromtimestamp(session["ts_start"] / 1000).strftime("%Y-%m-%d")
         events_path = config.events_path(date_str)
-        import json
         with open(events_path, "a") as f:
             f.write(json.dumps(event_dict, default=str) + "\n")
 
     logger.info("Ingested %d Claude Code sessions", len(completed))
-    state.last_claude_history_line = new_line_count
     state.save(config.state_path)
 
 
@@ -90,7 +93,15 @@ def _run_analysis(config: Config, events: list) -> dict | None:
 
     compression = detect_compression(events, config)
     pauses = classify(events, config)
-    return narrate_batch(compression, pauses, config)
+
+    # Extract claude_session events for the batch prompt
+    claude_sessions = [
+        {"duration_ms": e.duration_ms, "claude_prompt_count": 0,
+         "claude_project": e.cwd, "claude_prompts": [e.command.removeprefix("claude: ")]}
+        for e in events if e.type == "claude_session"
+    ] or None
+
+    return narrate_batch(compression, pauses, config, claude_sessions=claude_sessions)
 
 
 def _check_summaries(config: Config, state: DaemonState) -> None:

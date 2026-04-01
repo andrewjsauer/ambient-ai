@@ -46,11 +46,12 @@ def narrate_batch(
     compression: CompressionFindings,
     pauses: PauseFindings,
     config: Config,
+    claude_sessions: list[dict] | None = None,
 ) -> dict:
     compression_dict = _findings_to_dict(compression)
     pause_dict = _findings_to_dict(pauses)
 
-    prompt = build_batch_prompt(compression_dict, pause_dict)
+    prompt = build_batch_prompt(compression_dict, pause_dict, claude_sessions)
 
     # Build raw findings for preservation
     raw_findings = {
