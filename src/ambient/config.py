@@ -42,6 +42,7 @@ class Config:
 
     # Daemon
     daemon_dir: Path = field(default=None)
+    claude_history_path: Path = field(default=None)
 
     def __post_init__(self):
         if self.logs_dir is None:
@@ -52,6 +53,8 @@ class Config:
             self.models_dir = self.base_dir / "models"
         if self.daemon_dir is None:
             self.daemon_dir = self.base_dir / "daemon"
+        if self.claude_history_path is None:
+            self.claude_history_path = Path.home() / ".claude" / "history.jsonl"
 
     def ensure_dirs(self):
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -87,3 +90,4 @@ class Config:
     @property
     def dotenv_path(self) -> Path:
         return self.base_dir / ".env"
+

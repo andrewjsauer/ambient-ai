@@ -13,6 +13,7 @@ Be direct. No filler. Only include sections where the data supports findings."""
 def build_batch_prompt(
     compression_data: dict,
     pause_data: dict,
+    claude_sessions: list[dict] | None = None,
 ) -> str:
     sections = []
 
@@ -49,6 +50,20 @@ def build_batch_prompt(
             )
     elif not pause_data.get("available"):
         sections.append("\nCOGNITIVE STATE: Not available (GMM not calibrated).")
+
+    if claude_sessions:
+        sections.append(f"\nCLAUDE CODE SESSIONS ({len(claude_sessions)} in this window):")
+        for s in claude_sessions:
+            duration_min = s.get("duration_ms", 0) / 1000 / 60
+            prompts = s.get("claude_prompts", [])
+            first_prompt = prompts[0] if prompts else "(no prompt)"
+            project = s.get("claude_project", "unknown")
+            sections.append(
+                f"  Session: {duration_min:.0f}min | "
+                f"Prompts: {s.get('claude_prompt_count', 0)} | "
+                f"Project: {project} | "
+                f"First: \"{first_prompt}\""
+            )
 
     return "\n".join(sections)
 

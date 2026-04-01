@@ -43,6 +43,8 @@ class PauseFindings:
 def _extract_gaps(events: list[Event], session_boundary_ms: int) -> list[int]:
     gaps = []
     for e in events:
+        if e.type != "command":
+            continue
         if e.gap_ms is None:
             continue
         if e.session_boundary or e.gap_ms > session_boundary_ms:

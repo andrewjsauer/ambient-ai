@@ -22,7 +22,9 @@ CATEGORY_PATTERNS = {
 }
 
 
-def _categorize_command(cmd: str) -> str:
+def _categorize_command(cmd: str, event_type: str = "command") -> str:
+    if event_type == "claude_session":
+        return "claude"
     cmd_lower = cmd.lower()
     for category, patterns in CATEGORY_PATTERNS.items():
         for pattern in patterns:
@@ -185,7 +187,7 @@ def _build_segment(
 
     # Dominant category
     if events:
-        categories = [_categorize_command(e.command) for e in events]
+        categories = [_categorize_command(e.command, e.type) for e in events]
         cat_counts = Counter(categories)
         dominant_category = cat_counts.most_common(1)[0][0]
     else:

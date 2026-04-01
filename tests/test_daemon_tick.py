@@ -12,7 +12,7 @@ from ambient.daemon.tick import daemon_tick
 
 @pytest.fixture
 def config(tmp_path):
-    c = Config(base_dir=tmp_path)
+    c = Config(base_dir=tmp_path, claude_history_path=tmp_path / "claude_history.jsonl")
     c.ensure_dirs()
     return c
 

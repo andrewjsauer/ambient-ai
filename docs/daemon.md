@@ -33,7 +33,8 @@ The daemon is a macOS launchd user agent that invokes `ambient daemon-tick` ever
 
 When gates pass:
 
-1. **Analyze** -- Runs the full detection pipeline (compression + pause classification) on new events, sends findings to Claude Haiku, appends results to `analysis-YYYY-MM-DD.jsonl`
+0. **Ingest Claude sessions** -- Reads new entries from `~/.claude/history.jsonl`, groups them by sessionId, and appends completed sessions as `claude_session` events to the event stream. Uses a line-number cursor to avoid re-reading.
+1. **Analyze** -- Runs the full detection pipeline (compression + pause classification) on new events (commands + Claude sessions), sends findings to Claude Haiku, appends results to `analysis-YYYY-MM-DD.jsonl`
 2. **Update cursor** -- Advances the watermark to `latest_event.ts_start + 1` (exclusive bound) so events are never double-processed
 3. **Save state** -- Persists cursor immediately after analysis (crash-safe)
 4. **Catch-up summaries** -- Scans from `last_summary_date` forward for any day with analysis data but no summary file. Generates missing summaries using the full pipeline (changepoint detection + Claude Sonnet). Handles weekends, vacations, and gaps of any length.
@@ -60,6 +61,24 @@ launchd agents don't inherit shell environment variables. The daemon solves this
 - If the lock PID is dead (crash), the lock is broken and re-acquired
 - All operations (analysis, summaries, recalibration) run inside the lock
 
+### Claude Code Session Capture
+
+The daemon reads `~/.claude/history.jsonl` on each tick to capture Claude Code session patterns. This fills the biggest blind spot — shell gaps during Claude sessions are no longer misclassified as "stuck."
+
+**How it works:**
+- history.jsonl entries are grouped by sessionId
+- A session is "completed" when its latest entry is 30+ minutes old
+- Completed sessions are emitted as `claude_session` events into the same event stream
+- Each event includes: timestamps, project, prompt count, first 100 chars of each prompt
+- The pause classifier skips claude_session events (they don't have gaps)
+- The changepoint detector labels Claude-heavy segments as "claude-focused"
+- The batch prompt includes Claude session context for cross-correlation insights
+
+**Three-layer value from this data:**
+1. **Behavioral mirror** — See your full day including AI sessions, not just shell commands
+2. **Workflow optimizer** — Surface patterns like "you always run tests after Claude sessions" or "afternoon Claude sessions take 2x longer"
+3. **Skill builder** (Phase 2) — Track how your AI collaboration patterns change over weeks
+
 ### State File
 
 `~/.ambient/daemon/state.json` tracks:
@@ -69,7 +88,8 @@ launchd agents don't inherit shell environment variables. The daemon solves this
   "last_analyzed_ts": 1711870984117,
   "last_summary_date": "2026-03-30",
   "last_calibration_date": "2026-03-24",
-  "events_since_calibration": 450
+  "events_since_calibration": 450,
+  "last_claude_history_line": 11533
 }
 ```
 

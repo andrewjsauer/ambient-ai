@@ -136,6 +136,17 @@ def cmd_stats(config: Config, args):
     else:
         print("  Not enough data for rhythm analysis.")
 
+    # Claude Code sessions
+    claude_events = [e for e in events if e.type == "claude_session"]
+    if claude_events:
+        total_ms = sum(e.duration_ms for e in claude_events)
+        total_min = total_ms / 1000 / 60
+        print(f"\nCLAUDE CODE SESSIONS ({len(claude_events)} in window):")
+        print(f"  Total time: {total_min:.0f} min")
+        for e in claude_events:
+            dur = e.duration_ms / 1000 / 60
+            print(f"  {dur:.0f}min | {e.cwd} | {e.command[:80]}")
+
 
 def cmd_analyze(config: Config, args):
     from ambient.capture.reader import read_events_window

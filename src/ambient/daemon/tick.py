@@ -36,6 +36,42 @@ def _load_api_key(config: Config) -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
+def _ingest_claude_sessions(config: Config, state: DaemonState) -> None:
+    from ambient.daemon.claude_history import (
+        filter_completed_sessions,
+        group_into_sessions,
+        read_new_history_entries,
+        session_to_event,
+    )
+
+    entries, new_line_count = read_new_history_entries(
+        config.claude_history_path, state.last_claude_history_line
+    )
+    if not entries:
+        state.last_claude_history_line = max(new_line_count, state.last_claude_history_line)
+        state.save(config.state_path)
+        return
+
+    sessions = group_into_sessions(entries)
+    completed, _ = filter_completed_sessions(sessions)
+
+    if not completed:
+        return
+
+    config.ensure_dirs()
+    for session in completed:
+        event_dict = session_to_event(session)
+        date_str = datetime.fromtimestamp(session["ts_start"] / 1000).strftime("%Y-%m-%d")
+        events_path = config.events_path(date_str)
+        import json
+        with open(events_path, "a") as f:
+            f.write(json.dumps(event_dict, default=str) + "\n")
+
+    logger.info("Ingested %d Claude Code sessions", len(completed))
+    state.last_claude_history_line = new_line_count
+    state.save(config.state_path)
+
+
 def _get_new_events(config: Config, state: DaemonState) -> list:
     from ambient.capture.reader import read_events
 
@@ -143,7 +179,13 @@ def daemon_tick(config: Config) -> None:
     # Load state
     state = DaemonState.load(config.state_path)
 
-    # Gate 2: New events
+    # Ingest Claude Code sessions from history.jsonl
+    try:
+        _ingest_claude_sessions(config, state)
+    except Exception as e:
+        logger.error("Claude history ingestion failed: %s", e)
+
+    # Gate 2: New events (now includes any claude_session events just ingested)
     events = _get_new_events(config, state)
 
     # Gate 3: Lock (acquire before any work, including summary catch-up)

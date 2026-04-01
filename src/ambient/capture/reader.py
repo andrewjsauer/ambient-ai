@@ -21,6 +21,7 @@ class Event:
     tmux_pane: str | None
     gap_ms: int | None
     session_boundary: bool = False
+    type: str = "command"
 
     @classmethod
     def from_dict(cls, d: dict) -> "Event":
@@ -34,6 +35,7 @@ class Event:
             tmux_pane=d.get("tmux_pane"),
             gap_ms=d.get("gap_ms"),
             session_boundary=d.get("session_boundary", False),
+            type=d.get("type", "command"),
         )
 
 

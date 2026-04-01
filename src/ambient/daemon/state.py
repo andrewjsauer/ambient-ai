@@ -11,6 +11,7 @@ class DaemonState:
     last_summary_date: str = ""  # YYYY-MM-DD, last date a summary was generated
     last_calibration_date: str = ""  # YYYY-MM-DD
     events_since_calibration: int = 0
+    last_claude_history_line: int = 0  # line number cursor for ~/.claude/history.jsonl
 
     @classmethod
     def load(cls, path: Path) -> "DaemonState":
@@ -23,6 +24,7 @@ class DaemonState:
                 last_summary_date=data.get("last_summary_date", ""),
                 last_calibration_date=data.get("last_calibration_date", ""),
                 events_since_calibration=data.get("events_since_calibration", 0),
+                last_claude_history_line=data.get("last_claude_history_line", 0),
             )
         except (json.JSONDecodeError, KeyError, TypeError):
             return cls()
