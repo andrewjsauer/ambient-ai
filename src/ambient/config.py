@@ -33,16 +33,22 @@ class Config:
     pelt_min_size: int = 10
     pelt_model: str = "l1"
 
+    # Prompt pattern detector
+    prompt_pattern_min_frequency: int = 3
+    prompt_pattern_max_length: int = 4
+
     # API
     haiku_model: str = "claude-haiku-4-5"
     sonnet_model: str = "claude-sonnet-4-6"
 
     # Analysis
     default_window_minutes: int = 30
+    weekly_min_weeks: int = 2
 
     # Daemon
     daemon_dir: Path = field(default=None)
     claude_history_path: Path = field(default=None)
+    claude_projects_dir: Path = field(default=None)
 
     def __post_init__(self):
         if self.logs_dir is None:
@@ -55,6 +61,8 @@ class Config:
             self.daemon_dir = self.base_dir / "daemon"
         if self.claude_history_path is None:
             self.claude_history_path = Path.home() / ".claude" / "history.jsonl"
+        if self.claude_projects_dir is None:
+            self.claude_projects_dir = Path.home() / ".claude" / "projects"
 
     def ensure_dirs(self):
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -70,6 +78,9 @@ class Config:
 
     def summary_path(self, date_str: str) -> Path:
         return self.analysis_dir / f"summary-{date_str}.md"
+
+    def weekly_summary_path(self, date_str: str) -> Path:
+        return self.analysis_dir / f"weekly-{date_str}.md"
 
     @property
     def gmm_model_path(self) -> Path:

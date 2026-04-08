@@ -38,41 +38,75 @@ def _load_api_key(config: Config) -> bool:
 
 
 def _ingest_claude_sessions(config: Config, state: DaemonState) -> None:
-    from ambient.daemon.claude_history import (
-        filter_completed_sessions,
-        group_into_sessions,
-        read_new_history_entries,
-        session_to_event,
-    )
+    import time
 
-    entries, new_line_count = read_new_history_entries(
-        config.claude_history_path, state.last_claude_history_line
-    )
-    if not entries:
-        state.last_claude_history_line = max(new_line_count, state.last_claude_history_line)
-        state.save(config.state_path)
+    from ambient.daemon.session_parser import discover_session_files, parse_session_file
+
+    session_files = discover_session_files(config.claude_projects_dir)
+    if not session_files:
         return
 
-    sessions = group_into_sessions(entries)
-    completed, _ = filter_completed_sessions(sessions)
+    now_ms = int(time.time() * 1000)
+    session_complete_threshold_ms = 30 * 60 * 1000  # 30 minutes
 
-    # Always advance cursor after reading, even if no sessions completed yet
-    state.last_claude_history_line = max(new_line_count, state.last_claude_history_line)
-
-    if not completed:
-        state.save(config.state_path)
-        return
-
+    ingested_count = 0
     config.ensure_dirs()
-    for session in completed:
-        event_dict = session_to_event(session)
-        date_str = datetime.fromtimestamp(session["ts_start"] / 1000).strftime("%Y-%m-%d")
+
+    for path in session_files:
+        slug = path.parent.name
+        session_uuid = path.stem
+
+        if state.is_session_processed(slug, session_uuid):
+            continue
+
+        # Quick check: if file was modified recently, session is likely still active
+        try:
+            mtime_ms = int(path.stat().st_mtime * 1000)
+            if (now_ms - mtime_ms) < session_complete_threshold_ms:
+                continue
+        except OSError:
+            continue
+
+        # Parse the session file for full data
+        parsed = parse_session_file(path)
+        if parsed is None:
+            continue
+
+        # Double-check with parsed max timestamp (more accurate than mtime)
+        if (now_ms - parsed["end_ts"]) < session_complete_threshold_ms:
+            continue
+
+        # Build enriched event dict
+        event_dict = {
+            "type": "claude_session",
+            "ts_start": parsed["start_ts"],
+            "ts_end": parsed["end_ts"],
+            "duration_ms": parsed["duration_ms"],
+            "command": f"claude: {parsed['prompts'][0]}" if parsed["prompts"] else "claude: (empty session)",
+            "exit_code": 0,
+            "cwd": parsed["project"],
+            "tmux_pane": None,
+            "gap_ms": None,
+            "claude_session_id": parsed["session_id"],
+            "claude_prompts": parsed["prompts"],
+            "claude_tools": parsed["tools"],
+            "claude_files": parsed["files_touched"],
+            "claude_project": parsed["project"],
+            "claude_prompt_count": parsed["prompt_count"],
+            "claude_is_error_count": parsed["is_error_count"],
+        }
+
+        date_str = datetime.fromtimestamp(parsed["start_ts"] / 1000).strftime("%Y-%m-%d")
         events_path = config.events_path(date_str)
         with open(events_path, "a") as f:
             f.write(json.dumps(event_dict, default=str) + "\n")
 
-    logger.info("Ingested %d Claude Code sessions", len(completed))
-    state.save(config.state_path)
+        state.mark_session_processed(slug, session_uuid)
+        ingested_count += 1
+
+    if ingested_count:
+        logger.info("Ingested %d Claude Code sessions", ingested_count)
+        state.save(config.state_path)
 
 
 def _get_new_events(config: Config, state: DaemonState) -> list:
@@ -89,26 +123,45 @@ def _get_new_events(config: Config, state: DaemonState) -> list:
 def _run_analysis(config: Config, events: list) -> dict | None:
     from ambient.detect.compression import detect_compression
     from ambient.detect.pauses import classify
+    from ambient.detect.projects import detect_project_allocation
+    from ambient.detect.prompt_patterns import detect_prompt_patterns
     from ambient.present.narrator import narrate_batch
 
     compression = detect_compression(events, config)
     pauses = classify(events, config)
+    project_allocation = detect_project_allocation(events, config)
+    prompt_patterns = detect_prompt_patterns(events, config)
+
+    # Notify on stuck episodes (best-effort, never crash daemon)
+    try:
+        from ambient.present.notify import notify_stuck
+        notify_stuck(pauses.classifications, config)
+    except Exception as e:
+        logger.error("Stuck notification failed: %s", e)
 
     # Extract claude_session events for the batch prompt
     claude_sessions = [
-        {"duration_ms": e.duration_ms, "claude_prompt_count": 0,
-         "claude_project": e.cwd, "claude_prompts": [e.command.removeprefix("claude: ")]}
+        {
+            "duration_ms": e.duration_ms,
+            "claude_prompt_count": e.claude_prompt_count or 0,
+            "claude_project": e.claude_project or e.cwd,
+            "claude_prompts": e.claude_prompts or [e.command.removeprefix("claude: ")],
+        }
         for e in events if e.type == "claude_session"
     ] or None
 
-    return narrate_batch(compression, pauses, config, claude_sessions=claude_sessions)
+    return narrate_batch(compression, pauses, config, claude_sessions=claude_sessions,
+                         project_allocation=project_allocation)
 
 
 def _check_summaries(config: Config, state: DaemonState) -> None:
     from ambient.capture.reader import read_events
     from ambient.detect.changepoints import detect_changepoints
+    from ambient.detect.compression import detect_compression
     from ambient.detect.pauses import classify
+    from ambient.detect.prompt_patterns import detect_prompt_patterns
     from ambient.present.narrator import load_batch_analyses, narrate_daily
+    from ambient.present.recommender import generate_recommendations
 
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -137,7 +190,80 @@ def _check_summaries(config: Config, state: DaemonState) -> None:
                 narrate_daily(batch_analyses, changepoints, config, date_str=date_str)
                 state.last_summary_date = date_str
 
+                # Generate recommendations from the day's full event data
+                try:
+                    compression = detect_compression(events, config)
+                    prompt_patterns = detect_prompt_patterns(events, config)
+                    generate_recommendations(prompt_patterns, compression, config)
+                except Exception as e:
+                    logger.error("Recommendation generation failed for %s: %s", date_str, e)
+
         current += timedelta(days=1)
+
+
+def _check_weekly_summary(config: Config, state: DaemonState) -> None:
+    today = datetime.now()
+
+    # Only run on Sunday
+    if today.weekday() != 6:
+        return
+
+    today_str = today.strftime("%Y-%m-%d")
+
+    # Check if already generated this week
+    if state.last_weekly_summary_date:
+        last_weekly = datetime.strptime(state.last_weekly_summary_date, "%Y-%m-%d").date()
+        days_since = (today.date() - last_weekly).days
+        if days_since < 7:
+            return
+
+    # Gather analysis files for current + previous weeks
+    from ambient.present.narrator import load_batch_analyses, narrate_weekly
+
+    weekly_analyses = []
+    week_labels = []
+    num_weeks = config.weekly_min_weeks + 1  # current week + min_weeks for comparison
+
+    for w in range(num_weeks):
+        week_end = today - timedelta(weeks=w)
+        week_start = week_end - timedelta(days=6)
+        date_range = f"{week_start.strftime('%Y-%m-%d')} to {week_end.strftime('%Y-%m-%d')}"
+
+        days_data = []
+        current_day = week_start.date()
+        while current_day <= week_end.date():
+            ds = current_day.strftime("%Y-%m-%d")
+            analyses = load_batch_analyses(config, ds)
+            if analyses:
+                # Merge all batch analyses for this day into one summary
+                merged = {"date": ds}
+                # Take compression/pauses from first analysis that has them
+                for a in analyses:
+                    if "compression" in a and "compression" not in merged:
+                        merged["compression"] = a["compression"]
+                    if "pauses" in a and "pauses" not in merged:
+                        merged["pauses"] = a["pauses"]
+                    if "project_allocation" in a and "project_allocation" not in merged:
+                        merged["project_allocation"] = a["project_allocation"]
+                days_data.append(merged)
+            current_day += timedelta(days=1)
+
+        label = "Current week" if w == 0 else f"Week -{w}"
+        weekly_analyses.append({"date_range": date_range, "days": days_data})
+        week_labels.append(label)
+
+    # Check minimum data gate
+    weeks_with_data = sum(1 for w in weekly_analyses if w["days"])
+    if weeks_with_data < config.weekly_min_weeks:
+        logger.info(
+            "Weekly summary skipped: only %d weeks with data, need %d",
+            weeks_with_data, config.weekly_min_weeks,
+        )
+        return
+
+    logger.info("Generating weekly summary for %s", today_str)
+    narrate_weekly(weekly_analyses, week_labels, config, date_str=today_str)
+    state.last_weekly_summary_date = today_str
 
 
 def _check_recalibration(config: Config, state: DaemonState) -> None:
@@ -225,6 +351,12 @@ def daemon_tick(config: Config) -> None:
             _check_summaries(config, state)
         except Exception as e:
             logger.error("Summary catch-up failed: %s", e)
+
+        # Check weekly summary (after daily summaries)
+        try:
+            _check_weekly_summary(config, state)
+        except Exception as e:
+            logger.error("Weekly summary failed: %s", e)
 
         # Check recalibration (only meaningful when events were processed)
         try:

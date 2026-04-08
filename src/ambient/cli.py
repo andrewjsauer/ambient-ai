@@ -1,6 +1,8 @@
 import argparse
 import json
 import os
+import re
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -253,6 +255,115 @@ def cmd_calibrate(config: Config, args):
         print(f"\n{result.reason}")
 
 
+def _parse_recommendation_frontmatter(text: str) -> dict:
+    """Parse YAML frontmatter from a recommendation .md file."""
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
+    if not match:
+        return {}
+    meta = {}
+    for line in match.group(1).splitlines():
+        if ":" in line:
+            key, _, value = line.partition(":")
+            value = value.strip().strip('"').strip("'")
+            meta[key.strip()] = value
+    return meta
+
+
+def cmd_recommendations(config: Config, args):
+    rec_dir = config.base_dir / "recommendations"
+    if not rec_dir.exists():
+        print("No recommendations directory found.")
+        return
+
+    files = sorted(rec_dir.glob("*.md"))
+    if not files:
+        print("No pending recommendations.")
+        return
+
+    print(f"{'ID':<30} {'TYPE':<10} TITLE")
+    print("-" * 70)
+    for f in files:
+        rec_id = f.stem
+        meta = _parse_recommendation_frontmatter(f.read_text())
+        rec_type = meta.get("type", "unknown")
+        title = meta.get("title", rec_id)
+        print(f"{rec_id:<30} {rec_type:<10} {title}")
+
+
+def cmd_apply(config: Config, args):
+    rec_id = args.recommendation_id
+    rec_dir = config.base_dir / "recommendations"
+    rec_path = rec_dir / f"{rec_id}.md"
+
+    if not rec_path.exists():
+        print(f"Recommendation not found: {rec_id}", file=sys.stderr)
+        sys.exit(1)
+
+    text = rec_path.read_text()
+    meta = _parse_recommendation_frontmatter(text)
+    rec_type = meta.get("type", "unknown")
+
+    if rec_type != "skill":
+        print(f"Only skill installation supported. Type '{rec_type}' must be applied manually.")
+        print(f"Use the file directly: {rec_path}")
+        return
+
+    # Extract artifact (everything after frontmatter)
+    body_match = re.match(r"^---\s*\n.*?\n---\s*\n(.*)$", text, re.DOTALL)
+    artifact = body_match.group(1).strip() if body_match else text
+
+    commands_dir = Path.home() / ".claude" / "commands"
+    commands_dir.mkdir(parents=True, exist_ok=True)
+
+    dest = commands_dir / f"{rec_id}.md"
+    dest.write_text(artifact + "\n")
+
+    print(f"Installed skill to: {dest}")
+
+
+def cmd_projects(config: Config, args):
+    from ambient.capture.reader import read_events_window, read_events
+    from ambient.detect.projects import detect_project_allocation
+
+    window = args.window if hasattr(args, "window") and args.window else None
+    date = args.date if hasattr(args, "date") and args.date else None
+
+    if date:
+        events = read_events(config, date_str=date)
+        label = f"date {date}"
+    elif window:
+        events = read_events_window(config, window)
+        label = f"last {window} minutes"
+    else:
+        events = read_events_window(config, config.default_window_minutes)
+        label = f"last {config.default_window_minutes} minutes"
+
+    if not events:
+        print(f"No events for {label}.")
+        return
+
+    findings = detect_project_allocation(events, config)
+
+    total_ms = sum(a.total_ms for a in findings.allocations)
+
+    print(f"=== Project Allocation ({label}, {len(events)} events) ===\n")
+    print(f"{'PROJECT':<25} {'TIME':>10} {'%':>6} {'SESSIONS':>10} {'EVENTS':>8}")
+    print("-" * 63)
+
+    for a in findings.allocations:
+        minutes = a.total_ms / 1000 / 60
+        pct = (a.total_ms / total_ms * 100) if total_ms else 0
+        if minutes >= 60:
+            time_str = f"{minutes / 60:.1f}h"
+        else:
+            time_str = f"{minutes:.0f}m"
+        print(f"{a.project:<25} {time_str:>10} {pct:>5.0f}% {a.session_count:>10} {a.event_count:>8}")
+
+    print(f"\nContext switches: {findings.context_switches}")
+    if findings.primary_project:
+        print(f"Primary project: {findings.primary_project}")
+
+
 def cmd_daemon_tick(config: Config, args):
     from ambient.daemon.tick import daemon_tick
     daemon_tick(config)
@@ -365,6 +476,15 @@ def main():
 
     subparsers.add_parser("calibrate", help="Fit GMM on accumulated event data")
 
+    subparsers.add_parser("recommendations", help="List pending recommendations")
+
+    apply_parser = subparsers.add_parser("apply", help="Install a staged recommendation")
+    apply_parser.add_argument("recommendation_id", help="Recommendation ID to apply")
+
+    projects_parser = subparsers.add_parser("projects", help="Show per-project time allocation")
+    projects_parser.add_argument("--window", type=int, help="Analysis window in minutes")
+    projects_parser.add_argument("--date", help="Date to analyze (YYYY-MM-DD)")
+
     # Daemon commands (flat, matching existing pattern)
     subparsers.add_parser("daemon-tick", help=argparse.SUPPRESS)  # hidden launchd entry point
     subparsers.add_parser("daemon-start", help="Start the background analysis daemon")
@@ -383,6 +503,9 @@ def main():
         "summary": cmd_summary,
         "review": cmd_review,
         "calibrate": cmd_calibrate,
+        "recommendations": cmd_recommendations,
+        "apply": cmd_apply,
+        "projects": cmd_projects,
         "daemon-tick": cmd_daemon_tick,
         "daemon-start": cmd_daemon_start,
         "daemon-stop": cmd_daemon_stop,

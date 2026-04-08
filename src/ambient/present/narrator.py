@@ -11,8 +11,10 @@ from ambient.detect.pauses import PauseFindings
 from ambient.present.prompts import (
     BATCH_SYSTEM,
     DAILY_SYSTEM,
+    WEEKLY_SYSTEM,
     build_batch_prompt,
     build_daily_prompt,
+    build_weekly_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,21 +27,8 @@ def _findings_to_dict(findings) -> dict:
 
 
 def _call_api(config: Config, system: str, prompt: str, model: str) -> str:
-    try:
-        import anthropic
-    except ImportError:
-        raise RuntimeError("anthropic package not installed. Run: pip install anthropic")
-
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model=model,
-        max_tokens=2048,
-        system=system,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    if not response.content:
-        raise RuntimeError("API returned empty response content")
-    return response.content[0].text
+    from ambient.present.api import call_api
+    return call_api(config, system, prompt, model)
 
 
 def narrate_batch(
@@ -47,11 +36,13 @@ def narrate_batch(
     pauses: PauseFindings,
     config: Config,
     claude_sessions: list[dict] | None = None,
+    project_allocation: object | None = None,
 ) -> dict:
     compression_dict = _findings_to_dict(compression)
     pause_dict = _findings_to_dict(pauses)
+    project_dict = _findings_to_dict(project_allocation) if project_allocation else None
 
-    prompt = build_batch_prompt(compression_dict, pause_dict, claude_sessions)
+    prompt = build_batch_prompt(compression_dict, pause_dict, claude_sessions, project_dict)
 
     # Build raw findings for preservation
     raw_findings = {
@@ -59,6 +50,8 @@ def narrate_batch(
         "compression": compression_dict,
         "pauses": pause_dict,
     }
+    if project_dict:
+        raw_findings["project_allocation"] = project_dict
 
     try:
         response_text = _call_api(config, BATCH_SYSTEM, prompt, config.haiku_model)
@@ -125,3 +118,32 @@ def load_batch_analyses(config: Config, date_str: str) -> list[dict]:
                 except json.JSONDecodeError:
                     continue
     return analyses
+
+
+def narrate_weekly(
+    weekly_analyses: list[dict],
+    week_labels: list[str],
+    config: Config,
+    date_str: str | None = None,
+) -> str:
+    """Generate a weekly trend summary from multiple weeks of daily analysis data."""
+    prompt = build_weekly_prompt(weekly_analyses, week_labels)
+
+    try:
+        narrative = _call_api(config, WEEKLY_SYSTEM, prompt, config.sonnet_model)
+    except Exception as e:
+        logger.error("Weekly summary API call failed: %s", e)
+        total_days = sum(len(w.get("days", [])) for w in weekly_analyses)
+        narrative = (
+            f"# Weekly Summary (API unavailable)\n\n"
+            f"API error: {e}\n\n"
+            f"Raw data: {len(weekly_analyses)} weeks, {total_days} days of data.\n"
+        )
+
+    config.ensure_dirs()
+    if date_str is None:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+    weekly_path = config.weekly_summary_path(date_str)
+    weekly_path.write_text(narrative)
+
+    return narrative

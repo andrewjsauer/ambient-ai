@@ -14,6 +14,7 @@ def build_batch_prompt(
     compression_data: dict,
     pause_data: dict,
     claude_sessions: list[dict] | None = None,
+    project_data: dict | None = None,
 ) -> str:
     sections = []
 
@@ -64,6 +65,118 @@ def build_batch_prompt(
                 f"Project: {project} | "
                 f"First: \"{first_prompt}\""
             )
+
+    if project_data and project_data.get("allocations"):
+        sections.append(f"\nPROJECT ALLOCATION ({len(project_data['allocations'])} projects):")
+        for a in project_data["allocations"]:
+            mins = a["total_ms"] / 1000 / 60
+            sections.append(
+                f"  {a['project']}: {mins:.0f}min | "
+                f"Events: {a['event_count']} | "
+                f"Sessions: {a['session_count']}"
+            )
+        sections.append(f"  Context switches: {project_data['context_switches']}")
+        sections.append(f"  Primary project: {project_data['primary_project']}")
+
+    return "\n".join(sections)
+
+
+WEEKLY_SYSTEM = """You are writing a structured weekly behavioral trend report for a developer. Below are the daily analysis summaries from the past week(s).
+
+Fill in each section of the template below using only the provided data. Keep the italic description lines exactly as they are. Write 2-4 direct sentences per section (use bullets where appropriate). Write in second person ("You..."). No filler. Focus on trends and changes across days, not single-day events.
+
+## Week Overview
+_High-level summary of the week: total active days, overall productivity trend, dominant project(s)._
+
+## Project Allocation Trends
+_How time allocation across projects shifted compared to previous weeks. New projects, abandoned projects, growing/shrinking allocations._
+
+## Pattern Trends
+_How compression ratios, command rates, and automation candidates evolved. Are repeated sequences increasing or decreasing?_
+
+## Stuck Episode Trends
+_Frequency and severity of stuck episodes across the week. Are they improving, worsening, or stable? Common triggers._
+
+## Recommendation Adoption
+_Which previous recommendations appear to have been adopted (reduced repetition, new aliases) vs ignored. Evidence from the data._
+
+## Key Shifts
+_1-3 significant behavioral changes compared to previous week(s). Concrete observations, not speculation._"""
+
+
+def build_weekly_prompt(weekly_analyses: list[dict], week_labels: list[str]) -> str:
+    """Build prompt from multiple weeks of daily analysis data.
+
+    Args:
+        weekly_analyses: List of dicts, one per week, each containing:
+            - date_range: str like "2026-03-31 to 2026-04-06"
+            - days: list of daily analysis dicts
+        week_labels: List of labels like ["Current week", "Previous week"]
+    """
+    sections = []
+
+    for i, (week_data, label) in enumerate(zip(weekly_analyses, week_labels)):
+        sections.append(f"\n{'='*60}")
+        sections.append(f"{label}: {week_data.get('date_range', 'unknown')}")
+        sections.append(f"{'='*60}")
+
+        days = week_data.get("days", [])
+        if not days:
+            sections.append("  No analysis data for this week.")
+            continue
+
+        sections.append(f"  Active days: {len(days)}")
+
+        # Aggregate stats across the week
+        total_compression_ratio = []
+        total_stuck = 0
+        total_classifications = 0
+        projects = {}
+
+        for day in days:
+            date_str = day.get("date", "unknown")
+            sections.append(f"\n  --- {date_str} ---")
+
+            # Compression data
+            compression = day.get("compression", {})
+            ratio = compression.get("compression_ratio")
+            if ratio is not None:
+                total_compression_ratio.append(ratio)
+                sections.append(f"    Compression ratio: {ratio:.3f}")
+
+            seqs = compression.get("sequences", [])
+            if seqs:
+                sections.append(f"    Repeated sequences: {len(seqs)}")
+
+            # Pause data
+            pauses = day.get("pauses", {})
+            classifications = pauses.get("classifications", [])
+            if classifications:
+                stuck_count = sum(1 for c in classifications if c.get("label") == "stuck")
+                total_stuck += stuck_count
+                total_classifications += len(classifications)
+                sections.append(f"    Pauses: {len(classifications)} (stuck: {stuck_count})")
+
+            # Project allocation
+            proj_alloc = day.get("project_allocation", {})
+            allocations = proj_alloc.get("allocations", [])
+            for a in allocations:
+                proj = a.get("project", "unknown")
+                projects[proj] = projects.get(proj, 0) + a.get("total_ms", 0)
+
+        # Week summary stats
+        if total_compression_ratio:
+            avg_ratio = sum(total_compression_ratio) / len(total_compression_ratio)
+            sections.append(f"\n  Week avg compression ratio: {avg_ratio:.3f}")
+        if total_classifications:
+            stuck_pct = total_stuck / total_classifications * 100
+            sections.append(f"  Week stuck episodes: {total_stuck}/{total_classifications} ({stuck_pct:.0f}%)")
+        if projects:
+            sorted_projects = sorted(projects.items(), key=lambda x: x[1], reverse=True)
+            sections.append("  Week project allocation:")
+            for proj, ms in sorted_projects[:5]:
+                mins = ms / 1000 / 60
+                sections.append(f"    {proj}: {mins:.0f}min")
 
     return "\n".join(sections)
 

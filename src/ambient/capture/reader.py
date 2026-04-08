@@ -22,6 +22,14 @@ class Event:
     gap_ms: int | None
     session_boundary: bool = False
     type: str = "command"
+    # Claude session fields (optional, None for shell command events)
+    claude_session_id: str | None = None
+    claude_prompts: list[str] | None = None
+    claude_tools: list[dict] | None = None
+    claude_files: list[str] | None = None
+    claude_project: str | None = None
+    claude_prompt_count: int | None = None
+    claude_is_error_count: int | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "Event":
@@ -36,6 +44,13 @@ class Event:
             gap_ms=d.get("gap_ms"),
             session_boundary=d.get("session_boundary", False),
             type=d.get("type", "command"),
+            claude_session_id=d.get("claude_session_id"),
+            claude_prompts=d.get("claude_prompts"),
+            claude_tools=d.get("claude_tools"),
+            claude_files=d.get("claude_files"),
+            claude_project=d.get("claude_project"),
+            claude_prompt_count=d.get("claude_prompt_count"),
+            claude_is_error_count=d.get("claude_is_error_count"),
         )
 
 

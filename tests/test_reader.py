@@ -105,6 +105,89 @@ def test_midnight_crossing(tmp_config):
     assert len(result) == 6
 
 
+def test_claude_session_event_round_trips(tmp_config):
+    """Claude session events with all new fields should round-trip through JSONL."""
+    events = [
+        {
+            **_make_event(1000, command="claude: fix tests"),
+            "type": "claude_session",
+            "claude_session_id": "abc-123",
+            "claude_prompts": ["fix the failing tests", "yes, apply that"],
+            "claude_tools": [{"name": "Edit", "files": ["src/foo.py"]}],
+            "claude_files": ["src/foo.py"],
+            "claude_project": "my-project",
+            "claude_prompt_count": 2,
+            "claude_is_error_count": 0,
+        }
+    ]
+    _write_events(tmp_config.events_path("2026-04-08"), events)
+
+    result = read_events(tmp_config, date_str="2026-04-08")
+    assert len(result) == 1
+    e = result[0]
+    assert e.type == "claude_session"
+    assert e.claude_session_id == "abc-123"
+    assert e.claude_prompts == ["fix the failing tests", "yes, apply that"]
+    assert e.claude_tools == [{"name": "Edit", "files": ["src/foo.py"]}]
+    assert e.claude_files == ["src/foo.py"]
+    assert e.claude_project == "my-project"
+    assert e.claude_prompt_count == 2
+    assert e.claude_is_error_count == 0
+
+
+def test_shell_event_claude_fields_default_none(tmp_config):
+    """Shell command events should have all Claude fields as None."""
+    events = [_make_event(1000)]
+    _write_events(tmp_config.events_path("2026-04-08"), events)
+
+    result = read_events(tmp_config, date_str="2026-04-08")
+    e = result[0]
+    assert e.type == "command"
+    assert e.claude_session_id is None
+    assert e.claude_prompts is None
+    assert e.claude_tools is None
+    assert e.claude_files is None
+    assert e.claude_project is None
+    assert e.claude_prompt_count is None
+    assert e.claude_is_error_count is None
+
+
+def test_partial_claude_fields(tmp_config):
+    """Events with some Claude fields present and others missing."""
+    events = [
+        {
+            **_make_event(1000),
+            "type": "claude_session",
+            "claude_session_id": "xyz-789",
+            "claude_project": "partial-project",
+            # other Claude fields missing
+        }
+    ]
+    _write_events(tmp_config.events_path("2026-04-08"), events)
+
+    result = read_events(tmp_config, date_str="2026-04-08")
+    e = result[0]
+    assert e.claude_session_id == "xyz-789"
+    assert e.claude_project == "partial-project"
+    assert e.claude_prompts is None
+    assert e.claude_tools is None
+
+
+def test_extra_unknown_fields_ignored(tmp_config):
+    """Events with unknown extra fields should not raise."""
+    events = [
+        {
+            **_make_event(1000),
+            "some_future_field": "value",
+            "another_unknown": 42,
+        }
+    ]
+    _write_events(tmp_config.events_path("2026-04-08"), events)
+
+    result = read_events(tmp_config, date_str="2026-04-08")
+    assert len(result) == 1
+
+
 def test_session_boundary_preserved(tmp_config):
     events = [
         _make_event(1000, gap_ms=None),

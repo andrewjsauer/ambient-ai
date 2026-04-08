@@ -1,0 +1,39 @@
+"""macOS notifications for stuck episodes detected by the pause classifier."""
+
+import logging
+import subprocess
+import time
+
+from ambient.config import Config
+from ambient.detect.pauses import PauseClassification
+
+logger = logging.getLogger(__name__)
+
+STUCK_THRESHOLD_MS = 600_000  # 10 minutes
+
+
+def notify_stuck(classifications: list[PauseClassification], config: Config) -> None:
+    """Send a macOS notification if a stuck episode exceeds 10 minutes.
+
+    Rate limited to at most one notification per call.
+    """
+    stuck = [c for c in classifications if c.label == "stuck" and c.gap_ms > STUCK_THRESHOLD_MS]
+    if not stuck:
+        return
+
+    # Pick the worst one
+    worst = max(stuck, key=lambda c: c.gap_ms)
+    minutes = worst.gap_ms // 60_000
+    message = f"Stuck for {minutes}m after: {worst.preceding_command[:60]}"
+
+    try:
+        subprocess.run(
+            [
+                "osascript", "-e",
+                f'display notification "{message}" with title "Ambient"',
+            ],
+            timeout=5,
+            capture_output=True,
+        )
+    except Exception as e:
+        logger.error("Failed to send stuck notification: %s", e)
