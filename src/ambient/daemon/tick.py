@@ -70,6 +70,8 @@ def _ingest_claude_sessions(config: Config, state: DaemonState) -> None:
         # Parse the session file for full data
         parsed = parse_session_file(path)
         if parsed is None:
+            # Mark unparseable sessions as processed to avoid re-parsing every tick
+            state.mark_session_processed(slug, session_uuid)
             continue
 
         # Double-check with parsed max timestamp (more accurate than mtime)
@@ -189,6 +191,7 @@ def _check_summaries(config: Config, state: DaemonState) -> None:
                 changepoints = detect_changepoints(events, config, pause_result)
                 narrate_daily(batch_analyses, changepoints, config, date_str=date_str)
                 state.last_summary_date = date_str
+                state.save(config.state_path)
 
                 # Generate recommendations from the day's full event data
                 try:

@@ -75,9 +75,10 @@ def correlate_signals(
     # Pattern 2: claude_then_retry
     # Claude session followed by a shell command matching one from before the session
     for cs in claude_sessions:
-        # Collect commands that happened before this Claude session
+        # Collect commands that happened shortly before this Claude session (within window)
         pre_commands = {
-            c.command for c in commands if c.ts_end <= cs.ts_start
+            c.command for c in commands
+            if cs.ts_start - correlation_window_ms <= c.ts_end <= cs.ts_start
         }
         if not pre_commands:
             continue

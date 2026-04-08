@@ -24,7 +24,9 @@ def notify_stuck(classifications: list[PauseClassification], config: Config) -> 
     # Pick the worst one
     worst = max(stuck, key=lambda c: c.gap_ms)
     minutes = worst.gap_ms // 60_000
-    message = f"Stuck for {minutes}m after: {worst.preceding_command[:60]}"
+    # Escape double-quotes to prevent AppleScript injection from raw command strings
+    cmd_preview = worst.preceding_command[:60].replace("\\", "\\\\").replace('"', '\\"')
+    message = f"Stuck for {minutes}m after: {cmd_preview}"
 
     try:
         subprocess.run(
