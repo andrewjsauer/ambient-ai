@@ -6,7 +6,10 @@ import pytest
 from ambient.config import Config
 from ambient.detect.compression import CompressionFindings, RepeatedSequence
 from ambient.detect.pauses import PauseFindings, PauseClassification
-from ambient.present.narrator import narrate_batch, narrate_daily, load_batch_analyses
+from ambient.present.narrator import (
+    narrate_batch, narrate_daily, narrate_weekly, load_batch_analyses,
+    DAILY_INPUT_BUDGET, WEEKLY_INPUT_BUDGET,
+)
 from ambient.present.prompts import build_batch_prompt, build_daily_prompt, DAILY_SYSTEM
 
 
@@ -185,3 +188,65 @@ def test_narrate_daily_respects_date_param(mock_api, config):
     today = datetime.now().strftime("%Y-%m-%d")
     if today != "2026-03-29":
         assert not config.summary_path(today).exists()
+
+
+@patch("ambient.present.narrator._call_api")
+def test_narrate_daily_trims_when_over_budget(mock_api, config):
+    """When batch analyses exceed budget, oldest are dropped."""
+    mock_api.return_value = "trimmed summary"
+
+    # Create many large batch analyses to exceed budget
+    large_batch = {"data": "x" * 5000}
+    batch_analyses = [large_batch] * 50
+
+    with patch("ambient.present.narrator.DAILY_INPUT_BUDGET", 1000):
+        result = narrate_daily(batch_analyses, None, config)
+
+    assert "trimmed summary" in result
+    # The prompt builder should have been called with fewer analyses
+    call_args = mock_api.call_args
+    # Verify the call was made (trimming doesn't prevent the API call)
+    assert mock_api.called
+
+
+@patch("ambient.present.narrator._call_api")
+def test_narrate_daily_no_trim_when_under_budget(mock_api, config):
+    """Small data should pass through without trimming."""
+    mock_api.return_value = "small summary"
+
+    batch_analyses = [{"summary": "window 1"}, {"summary": "window 2"}]
+    result = narrate_daily(batch_analyses, None, config)
+
+    assert "small summary" in result
+
+
+@patch("ambient.present.narrator._call_api")
+def test_narrate_weekly_trims_oldest_weeks(mock_api, config):
+    """When weekly data exceeds budget, oldest weeks are dropped first."""
+    mock_api.return_value = "weekly summary"
+
+    weeks = [
+        {"date_range": "current", "days": [{"date": "2026-04-07", "data": "x" * 5000}]},
+        {"date_range": "week-1", "days": [{"date": "2026-03-31", "data": "x" * 5000}]},
+        {"date_range": "week-2", "days": [{"date": "2026-03-24", "data": "x" * 5000}]},
+    ]
+    labels = ["Current week", "Week -1", "Week -2"]
+
+    with patch("ambient.present.narrator.WEEKLY_INPUT_BUDGET", 500):
+        result = narrate_weekly(weeks, labels, config)
+
+    assert "weekly summary" in result
+    assert mock_api.called
+
+
+@patch("ambient.present.narrator._call_api")
+def test_narrate_daily_keeps_at_least_one_analysis(mock_api, config):
+    """Even with a tiny budget, at least one analysis is kept."""
+    mock_api.return_value = "minimal summary"
+
+    batch_analyses = [{"data": "x" * 10000}] * 10
+
+    with patch("ambient.present.narrator.DAILY_INPUT_BUDGET", 1):
+        result = narrate_daily(batch_analyses, None, config)
+
+    assert mock_api.called

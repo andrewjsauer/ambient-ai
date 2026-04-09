@@ -100,11 +100,18 @@ _Frequency and severity of stuck episodes across the week. Are they improving, w
 ## Recommendation Adoption
 _Which previous recommendations appear to have been adopted (reduced repetition, new aliases) vs ignored. Evidence from the data._
 
+## Coaching Highlights
+_3-5 bullet points: top stuck patterns by project/tool, resolution velocity trend vs previous week, and one specific improvement suggestion backed by the data. This is the actionable summary — full analysis is available via `ambient insights`._
+
 ## Key Shifts
 _1-3 significant behavioral changes compared to previous week(s). Concrete observations, not speculation._"""
 
 
-def build_weekly_prompt(weekly_analyses: list[dict], week_labels: list[str]) -> str:
+def build_weekly_prompt(
+    weekly_analyses: list[dict],
+    week_labels: list[str],
+    coaching_data: dict | None = None,
+) -> str:
     """Build prompt from multiple weeks of daily analysis data.
 
     Args:
@@ -112,6 +119,7 @@ def build_weekly_prompt(weekly_analyses: list[dict], week_labels: list[str]) -> 
             - date_range: str like "2026-03-31 to 2026-04-06"
             - days: list of daily analysis dicts
         week_labels: List of labels like ["Current week", "Previous week"]
+        coaching_data: Optional coaching analysis for the current week.
     """
     sections = []
 
@@ -177,6 +185,34 @@ def build_weekly_prompt(weekly_analyses: list[dict], week_labels: list[str]) -> 
             for proj, ms in sorted_projects[:5]:
                 mins = ms / 1000 / 60
                 sections.append(f"    {proj}: {mins:.0f}min")
+
+    # Coaching data for current week
+    if coaching_data:
+        sections.append(f"\n{'='*60}")
+        sections.append("COACHING ANALYSIS (current week)")
+        sections.append(f"{'='*60}")
+
+        outcomes = coaching_data.get("outcomes", {})
+        if outcomes:
+            sections.append("  Session outcomes:")
+            for cls, count in outcomes.items():
+                sections.append(f"    {cls}: {count}")
+
+        avg_thrash = coaching_data.get("avg_thrash_score")
+        if avg_thrash is not None:
+            sections.append(f"  Average thrash score: {avg_thrash:.2f}")
+
+        velocity = coaching_data.get("velocity", {})
+        if velocity.get("resolved_count", 0) > 0:
+            sections.append(f"  Resolution velocity: {velocity['avg_ms'] / 60000:.1f} min avg "
+                          f"({velocity['resolved_count']} resolved)")
+
+        stuck = coaching_data.get("stuck_patterns", [])
+        if stuck:
+            sections.append("  Top stuck patterns:")
+            for p in stuck[:3]:
+                sections.append(f"    {p['project']}: {p['episode_count']} episodes, "
+                              f"tools: {', '.join(p['failing_tools'])}")
 
     return "\n".join(sections)
 

@@ -10,6 +10,8 @@ from ambient.config import Config
 
 logger = logging.getLogger(__name__)
 
+MAX_SKILL_GENERATIONS_PER_TICK = 5
+
 SKILL_GENERATION_SYSTEM = """You are generating a Claude Code skill definition for a developer who repeatedly performs a specific action. Create a concise, useful skill that automates the detected pattern.
 
 Return ONLY the skill content in this format:
@@ -55,6 +57,7 @@ def generate_recommendations(
     prompt_patterns: object | None,
     compression_findings: object | None,
     config: Config,
+    client=None,
 ) -> RecommendationFindings:
     """Generate recommendation artifacts from detector findings.
 
@@ -63,15 +66,20 @@ def generate_recommendations(
     """
     recommendations = []
 
-    # Skill recommendations from prompt patterns
+    # Skill recommendations from prompt patterns (capped per tick)
+    skill_count = 0
     if prompt_patterns:
         patterns = _get_patterns(prompt_patterns)
         for pattern in patterns:
             if pattern["count"] < 5:  # higher bar for skill recommendations
                 continue
-            rec = _generate_skill_recommendation(pattern, config)
+            if skill_count >= MAX_SKILL_GENERATIONS_PER_TICK:
+                logger.info("Skill generation capped at %d per tick", MAX_SKILL_GENERATIONS_PER_TICK)
+                break
+            rec = _generate_skill_recommendation(pattern, config, client=client)
             if rec:
                 recommendations.append(rec)
+                skill_count += 1
 
     # Alias recommendations from compression findings
     if compression_findings:
@@ -120,7 +128,7 @@ def _get_sequences(compression_findings) -> list[dict]:
     return []
 
 
-def _generate_skill_recommendation(pattern: dict, config: Config) -> Recommendation | None:
+def _generate_skill_recommendation(pattern: dict, config: Config, client=None) -> Recommendation | None:
     """Generate a skill recommendation from a repeated prompt pattern."""
     normalized = pattern["normalized_prompt"]
     examples = pattern.get("raw_examples", [])[:3]
@@ -137,7 +145,8 @@ Generate a Claude Code skill that automates this action."""
 
     try:
         from ambient.present.api import call_api
-        artifact = call_api(config, SKILL_GENERATION_SYSTEM, prompt, config.haiku_model)
+        artifact = call_api(config, SKILL_GENERATION_SYSTEM, prompt, config.haiku_model,
+                            max_tokens=1024, client=client)
     except Exception as e:
         logger.warning("Skill generation failed for pattern '%s': %s", normalized, e)
         return None
@@ -182,6 +191,91 @@ def _generate_alias_recommendation(seq: dict) -> Recommendation | None:
         artifact=artifact,
         source_pattern=" -> ".join(commands),
     )
+
+
+COACHING_RULE_SYSTEM = """You are generating a CLAUDE.md rule for a developer who repeatedly gets stuck on a specific type of task. Create a concise, actionable rule that helps Claude Code avoid the pattern.
+
+Return ONLY the rule text, ready to append to a CLAUDE.md file. Format as a bullet point starting with "- ". Keep it to 1-3 sentences. Be specific about the project/tool context."""
+
+
+def generate_coaching_recommendations(
+    stuck_patterns,
+    velocity_metrics,
+    config: Config,
+    client=None,
+) -> list[Recommendation]:
+    """Generate recommendations from coaching insights with quality gate.
+
+    Quality gate: only generate when:
+    - 3+ stuck episodes on same project, OR
+    - resolution velocity >2x average (with >=3 chains), OR
+    - pattern across 3+ sessions
+    """
+    recommendations = []
+
+    # Stuck pattern recommendations
+    if stuck_patterns and hasattr(stuck_patterns, "patterns"):
+        for pattern in stuck_patterns.patterns:
+            if pattern.episode_count < 3:
+                continue
+
+            tools_str = ", ".join(pattern.failing_tools[:3])
+            files_str = ", ".join(pattern.file_cluster[:3])
+            prompt = (
+                f"A developer keeps getting stuck in the '{pattern.project}' project "
+                f"({pattern.episode_count} episodes, {pattern.total_duration_ms / 60000:.0f} min total). "
+                f"Failing tools: {tools_str}. Files involved: {files_str}. "
+                f"Average thrash score: {pattern.avg_thrash_score:.2f}.\n\n"
+                f"Generate a CLAUDE.md rule to help avoid this pattern."
+            )
+
+            try:
+                from ambient.present.api import call_api
+                artifact = call_api(config, COACHING_RULE_SYSTEM, prompt, config.haiku_model,
+                                    max_tokens=512, client=client)
+            except Exception:
+                continue
+
+            slug = _slugify(f"{pattern.project}-{tools_str}")
+            recommendations.append(Recommendation(
+                id=f"coaching-{slug}",
+                type="coaching",
+                title=f"Coaching: {pattern.project} stuck pattern ({tools_str})",
+                rationale=(
+                    f"{pattern.episode_count} stuck episodes on {pattern.project}, "
+                    f"avg thrash score {pattern.avg_thrash_score:.2f}, "
+                    f"{pattern.total_duration_ms / 60000:.0f} min total."
+                ),
+                artifact=artifact,
+                source_pattern=f"{pattern.project}: {tools_str}",
+            ))
+
+    # Velocity outlier recommendations
+    if velocity_metrics and hasattr(velocity_metrics, "by_project") and velocity_metrics.avg_ms > 0:
+        for proj, proj_metrics in velocity_metrics.by_project.items():
+            if proj_metrics.resolved_count < 3:
+                continue
+            if proj_metrics.avg_ms > velocity_metrics.avg_ms * 2:
+                slug = _slugify(f"{proj}-slow-resolution")
+                recommendations.append(Recommendation(
+                    id=f"coaching-{slug}",
+                    type="coaching",
+                    title=f"Coaching: {proj} slow resolution velocity",
+                    rationale=(
+                        f"{proj} avg resolution: {proj_metrics.avg_ms / 60000:.1f} min "
+                        f"vs overall avg {velocity_metrics.avg_ms / 60000:.1f} min "
+                        f"({proj_metrics.resolved_count} chains)."
+                    ),
+                    artifact=f"- When working on {proj}, check for common failure patterns before asking Claude. "
+                             f"Resolution takes {proj_metrics.avg_ms / 60000:.1f} min on average, "
+                             f"2x longer than other projects.",
+                    source_pattern=f"{proj}: slow resolution",
+                ))
+
+    if recommendations:
+        _write_recommendations(recommendations, config)
+
+    return recommendations
 
 
 def _write_recommendations(recommendations: list[Recommendation], config: Config) -> None:

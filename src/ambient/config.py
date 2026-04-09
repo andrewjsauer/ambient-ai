@@ -37,6 +37,14 @@ class Config:
     prompt_pattern_min_frequency: int = 3
     prompt_pattern_max_length: int = 4
 
+    # Coaching / thrash detection
+    thrash_score_threshold: float = 0.5
+    thrash_min_prompts: int = 3
+
+    # Resolution velocity
+    velocity_idle_break_ms: int = 900_000  # 15 minutes
+    velocity_min_chains: int = 5
+
     # API
     haiku_model: str = "claude-haiku-4-5"
     sonnet_model: str = "claude-sonnet-4-6"
@@ -81,6 +89,9 @@ class Config:
 
     def weekly_summary_path(self, date_str: str) -> Path:
         return self.analysis_dir / f"weekly-{date_str}.md"
+
+    def insights_path(self, date_str: str) -> Path:
+        return self.base_dir / "insights" / f"insights-{date_str}.md"
 
     @property
     def gmm_model_path(self) -> Path:

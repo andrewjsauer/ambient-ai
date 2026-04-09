@@ -122,7 +122,7 @@ def _get_new_events(config: Config, state: DaemonState) -> list:
     return read_events(config, start=cursor_dt, end=datetime.now())
 
 
-def _run_analysis(config: Config, events: list) -> dict | None:
+def _run_analysis(config: Config, events: list, client=None) -> dict | None:
     from ambient.detect.compression import detect_compression
     from ambient.detect.pauses import classify
     from ambient.detect.projects import detect_project_allocation
@@ -153,10 +153,10 @@ def _run_analysis(config: Config, events: list) -> dict | None:
     ] or None
 
     return narrate_batch(compression, pauses, config, claude_sessions=claude_sessions,
-                         project_allocation=project_allocation)
+                         project_allocation=project_allocation, client=client)
 
 
-def _check_summaries(config: Config, state: DaemonState) -> None:
+def _check_summaries(config: Config, state: DaemonState, client=None) -> None:
     from ambient.capture.reader import read_events
     from ambient.detect.changepoints import detect_changepoints
     from ambient.detect.compression import detect_compression
@@ -189,7 +189,7 @@ def _check_summaries(config: Config, state: DaemonState) -> None:
                 events = read_events(config, date_str=date_str)
                 pause_result = classify(events, config)
                 changepoints = detect_changepoints(events, config, pause_result)
-                narrate_daily(batch_analyses, changepoints, config, date_str=date_str)
+                narrate_daily(batch_analyses, changepoints, config, date_str=date_str, client=client)
                 state.last_summary_date = date_str
                 state.save(config.state_path)
 
@@ -197,14 +197,29 @@ def _check_summaries(config: Config, state: DaemonState) -> None:
                 try:
                     compression = detect_compression(events, config)
                     prompt_patterns = detect_prompt_patterns(events, config)
-                    generate_recommendations(prompt_patterns, compression, config)
+                    generate_recommendations(prompt_patterns, compression, config, client=client)
                 except Exception as e:
                     logger.error("Recommendation generation failed for %s: %s", date_str, e)
+
+                # Generate coaching recommendations from session analysis
+                try:
+                    from ambient.detect.coaching import classify_sessions, group_stuck_patterns
+                    from ambient.detect.velocity import detect_resolution_chains, compute_velocity_metrics
+                    from ambient.present.recommender import generate_coaching_recommendations
+
+                    coaching = classify_sessions(events, config)
+                    stuck = group_stuck_patterns(coaching.outcomes, events)
+                    outcome_map = {o.session_id: o.classification for o in coaching.outcomes}
+                    chains = detect_resolution_chains(events, config, session_outcomes=outcome_map)
+                    velocity = compute_velocity_metrics(chains, min_chains=config.velocity_min_chains)
+                    generate_coaching_recommendations(stuck, velocity, config, client=client)
+                except Exception as e:
+                    logger.error("Coaching recommendation generation failed for %s: %s", date_str, e)
 
         current += timedelta(days=1)
 
 
-def _check_weekly_summary(config: Config, state: DaemonState) -> None:
+def _check_weekly_summary(config: Config, state: DaemonState, client=None) -> None:
     today = datetime.now()
 
     # Only run on Sunday
@@ -264,8 +279,46 @@ def _check_weekly_summary(config: Config, state: DaemonState) -> None:
         )
         return
 
+    # Run coaching analysis for current week
+    coaching_data = None
+    try:
+        from ambient.capture.reader import read_events
+        from ambient.detect.coaching import classify_sessions, group_stuck_patterns
+        from ambient.detect.velocity import detect_resolution_chains, compute_velocity_metrics
+
+        week_end = today
+        week_start = week_end - timedelta(days=6)
+        week_events = read_events(config, start=week_start, end=week_end)
+
+        if week_events:
+            coaching = classify_sessions(week_events, config)
+            stuck = group_stuck_patterns(coaching.outcomes, week_events)
+            outcome_map = {o.session_id: o.classification for o in coaching.outcomes}
+            chains = detect_resolution_chains(week_events, config, session_outcomes=outcome_map)
+            velocity = compute_velocity_metrics(chains)
+
+            coaching_data = {
+                "outcomes": coaching.count_by_classification,
+                "avg_thrash_score": coaching.avg_thrash_score,
+                "velocity": {
+                    "avg_ms": velocity.avg_ms,
+                    "resolved_count": velocity.resolved_count,
+                },
+                "stuck_patterns": [
+                    {
+                        "project": p.project,
+                        "episode_count": p.episode_count,
+                        "failing_tools": p.failing_tools,
+                    }
+                    for p in stuck.patterns[:3]
+                ],
+            }
+    except Exception as e:
+        logger.error("Weekly coaching analysis failed: %s", e)
+
     logger.info("Generating weekly summary for %s", today_str)
-    narrate_weekly(weekly_analyses, week_labels, config, date_str=today_str)
+    narrate_weekly(weekly_analyses, week_labels, config, date_str=today_str,
+                   coaching_data=coaching_data, client=client)
     state.last_weekly_summary_date = today_str
 
 
@@ -316,6 +369,14 @@ def daemon_tick(config: Config) -> None:
         logger.info("No ANTHROPIC_API_KEY available, skipping")
         return
 
+    # Create shared API client for all calls in this tick (connection reuse + cache)
+    try:
+        import anthropic
+        client = anthropic.Anthropic(max_retries=3)
+    except ImportError:
+        client = None
+        logger.warning("anthropic package not installed, API calls will create individual clients")
+
     # Load state
     state = DaemonState.load(config.state_path)
 
@@ -339,7 +400,7 @@ def daemon_tick(config: Config) -> None:
         else:
             # Run analysis
             logger.info("Analyzing %d events", len(events))
-            _run_analysis(config, events)
+            _run_analysis(config, events, client=client)
 
             # Update cursor (exclusive: +1 so boundary event isn't re-read)
             latest_ts = max(e.ts_start for e in events)
@@ -351,13 +412,13 @@ def daemon_tick(config: Config) -> None:
 
         # Check for missing summaries (runs with or without new events)
         try:
-            _check_summaries(config, state)
+            _check_summaries(config, state, client=client)
         except Exception as e:
             logger.error("Summary catch-up failed: %s", e)
 
         # Check weekly summary (after daily summaries)
         try:
-            _check_weekly_summary(config, state)
+            _check_weekly_summary(config, state, client=client)
         except Exception as e:
             logger.error("Weekly summary failed: %s", e)
 

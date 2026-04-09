@@ -364,6 +364,39 @@ def cmd_projects(config: Config, args):
         print(f"Primary project: {findings.primary_project}")
 
 
+def cmd_insights(config: Config, args):
+    from ambient.present.insights import (
+        aggregate_coaching_data,
+        format_terminal_summary,
+        generate_insights_report,
+    )
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print("Error: ANTHROPIC_API_KEY not set.", file=sys.stderr)
+        sys.exit(1)
+
+    window = args.window if hasattr(args, "window") and args.window else 7
+
+    print(f"Analyzing last {window} days of activity...")
+    data = aggregate_coaching_data(config, window_days=window)
+
+    total_sessions = sum(data.coaching_findings.count_by_classification.values())
+    if total_sessions < 3:
+        print("Insufficient data for coaching analysis (need at least 3 Claude sessions).")
+        return
+
+    print(format_terminal_summary(data))
+
+    print("\nGenerating coaching report...")
+    narrative = generate_insights_report(data, config)
+
+    if narrative:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        print(f"\nFull report: {config.insights_path(date_str)}")
+    else:
+        print("\nReport generation failed (API error). Terminal summary above is still valid.")
+
+
 def cmd_daemon_tick(config: Config, args):
     from ambient.daemon.tick import daemon_tick
     daemon_tick(config)
@@ -481,6 +514,9 @@ def main():
     apply_parser = subparsers.add_parser("apply", help="Install a staged recommendation")
     apply_parser.add_argument("recommendation_id", help="Recommendation ID to apply")
 
+    insights_parser = subparsers.add_parser("insights", help="Generate coaching insights report")
+    insights_parser.add_argument("--window", type=int, help="Analysis window in days (default: 7)")
+
     projects_parser = subparsers.add_parser("projects", help="Show per-project time allocation")
     projects_parser.add_argument("--window", type=int, help="Analysis window in minutes")
     projects_parser.add_argument("--date", help="Date to analyze (YYYY-MM-DD)")
@@ -505,6 +541,7 @@ def main():
         "calibrate": cmd_calibrate,
         "recommendations": cmd_recommendations,
         "apply": cmd_apply,
+        "insights": cmd_insights,
         "projects": cmd_projects,
         "daemon-tick": cmd_daemon_tick,
         "daemon-start": cmd_daemon_start,
