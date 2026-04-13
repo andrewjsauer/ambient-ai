@@ -3,6 +3,7 @@
 import logging
 import subprocess
 import time
+from pathlib import Path
 
 from ambient.config import Config
 from ambient.detect.pauses import PauseClassification
@@ -28,14 +29,18 @@ def notify_stuck(classifications: list[PauseClassification], config: Config) -> 
     cmd_preview = worst.preceding_command[:60].replace("\\", "\\\\").replace('"', '\\"')
     message = f"Stuck for {minutes}m after: {cmd_preview}"
 
+    # Use the AmbientAI.app bundle so macOS attributes notifications to "Ambient AI"
+    # instead of "python3.14". Falls back to raw osascript if the bundle isn't found.
+    app_notify = Path(__file__).parent.parent.parent.parent / "resources" / "AmbientAI.app" / "Contents" / "MacOS" / "notify"
+
     try:
-        subprocess.run(
-            [
-                "osascript", "-e",
-                f'display notification "{message}" with title "Ambient"',
-            ],
-            timeout=5,
-            capture_output=True,
-        )
+        if app_notify.exists():
+            subprocess.run([str(app_notify), message], timeout=5, capture_output=True)
+        else:
+            subprocess.run(
+                ["osascript", "-e", f'display notification "{message}" with title "Ambient AI"'],
+                timeout=5,
+                capture_output=True,
+            )
     except Exception as e:
         logger.error("Failed to send stuck notification: %s", e)

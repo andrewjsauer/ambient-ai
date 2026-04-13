@@ -30,9 +30,10 @@ def test_stuck_notification_triggered(mock_run, config):
     classifications = [_make_classification(label="stuck", gap_ms=700_000)]
     notify_stuck(classifications, config)
     mock_run.assert_called_once()
-    args = mock_run.call_args
-    assert "osascript" in args[0][0][0]
-    assert "Ambient" in args[0][0][2]
+    call_args = mock_run.call_args[0][0]
+    # Should contain the message either via app bundle or osascript fallback
+    call_str = " ".join(str(a) for a in call_args)
+    assert "11m" in call_str or "Stuck" in call_str
 
 
 @patch("ambient.present.notify.subprocess.run")
@@ -46,8 +47,9 @@ def test_multiple_stuck_only_one_notification(mock_run, config):
     notify_stuck(classifications, config)
     assert mock_run.call_count == 1
     # Should pick the worst (900_000ms)
-    call_script = mock_run.call_args[0][0][2]
-    assert "15m" in call_script  # 900_000 // 60_000 = 15
+    call_args = mock_run.call_args[0][0]
+    call_str = " ".join(str(a) for a in call_args)
+    assert "15m" in call_str  # 900_000 // 60_000 = 15
 
 
 @patch("ambient.present.notify.subprocess.run")

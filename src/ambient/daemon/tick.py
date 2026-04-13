@@ -56,10 +56,7 @@ def _ingest_claude_sessions(config: Config, state: DaemonState) -> None:
         slug = path.parent.name
         session_uuid = path.stem
 
-        if state.is_session_processed(slug, session_uuid):
-            continue
-
-        # Quick check: if file was modified recently, session is likely still active
+        # Check if file was modified recently (still active)
         try:
             mtime_ms = int(path.stat().st_mtime * 1000)
             if (now_ms - mtime_ms) < session_complete_threshold_ms:
@@ -67,24 +64,43 @@ def _ingest_claude_sessions(config: Config, state: DaemonState) -> None:
         except OSError:
             continue
 
-        # Parse the session file for full data
-        parsed = parse_session_file(path)
+        # Determine if this is a new session or an incremental update
+        prev_line_count = state.get_session_line_count(slug, session_uuid)
+
+        # For legacy entries (line_count == -1), skip — we can't do incremental without a baseline
+        if prev_line_count == -1:
+            continue
+
+        # Parse the session file, skipping already-processed lines
+        parsed = parse_session_file(path, skip_lines=prev_line_count)
         if parsed is None:
-            # Mark unparseable sessions as processed to avoid re-parsing every tick
-            state.mark_session_processed(slug, session_uuid)
+            if prev_line_count == 0:
+                # First attempt failed — mark to avoid re-parsing every tick
+                state.mark_session_processed(slug, session_uuid, line_count=0)
             continue
 
         # Double-check with parsed max timestamp (more accurate than mtime)
         if (now_ms - parsed["end_ts"]) < session_complete_threshold_ms:
             continue
 
+        # Skip if no new content since last ingestion
+        if parsed["total_lines"] <= prev_line_count:
+            continue
+
+        # Skip if incremental parse found no new prompts or tool calls
+        if prev_line_count > 0 and not parsed["prompts"] and not parsed["tools"]:
+            state.mark_session_processed(slug, session_uuid, line_count=parsed["total_lines"])
+            continue
+
         # Build enriched event dict
+        # For incremental updates, timestamps span the full session but
+        # prompts/tools/errors only contain the new portion
         event_dict = {
             "type": "claude_session",
             "ts_start": parsed["start_ts"],
             "ts_end": parsed["end_ts"],
             "duration_ms": parsed["duration_ms"],
-            "command": f"claude: {parsed['prompts'][0]}" if parsed["prompts"] else "claude: (empty session)",
+            "command": f"claude: {parsed['prompts'][0]}" if parsed["prompts"] else "claude: (continued session)",
             "exit_code": 0,
             "cwd": parsed["project"],
             "tmux_pane": None,
@@ -98,12 +114,12 @@ def _ingest_claude_sessions(config: Config, state: DaemonState) -> None:
             "claude_is_error_count": parsed["is_error_count"],
         }
 
-        date_str = datetime.fromtimestamp(parsed["start_ts"] / 1000).strftime("%Y-%m-%d")
+        date_str = datetime.fromtimestamp(parsed["end_ts"] / 1000).strftime("%Y-%m-%d")
         events_path = config.events_path(date_str)
         with open(events_path, "a") as f:
             f.write(json.dumps(event_dict, default=str) + "\n")
 
-        state.mark_session_processed(slug, session_uuid)
+        state.mark_session_processed(slug, session_uuid, line_count=parsed["total_lines"])
         ingested_count += 1
 
     if ingested_count:

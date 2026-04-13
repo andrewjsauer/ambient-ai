@@ -75,17 +75,36 @@ class DaemonState:
         cutoff_ms = int(time.time() * 1000) - (30 * 24 * 60 * 60 * 1000)
         for slug in list(self.processed_sessions):
             sessions = self.processed_sessions[slug]
-            self.processed_sessions[slug] = {
-                uuid: ts for uuid, ts in sessions.items()
-                if ts > cutoff_ms
-            }
+            cleaned = {}
+            for uuid, entry in sessions.items():
+                if isinstance(entry, dict):
+                    if entry.get("ingested_at", 0) > cutoff_ms:
+                        cleaned[uuid] = entry
+                elif isinstance(entry, (int, float)):
+                    # Legacy format (bare int = ingested_at_ms)
+                    if entry > cutoff_ms:
+                        cleaned[uuid] = entry
+            self.processed_sessions[slug] = cleaned
             if not self.processed_sessions[slug]:
                 del self.processed_sessions[slug]
 
     def is_session_processed(self, slug: str, session_uuid: str) -> bool:
         return session_uuid in self.processed_sessions.get(slug, {})
 
-    def mark_session_processed(self, slug: str, session_uuid: str) -> None:
+    def get_session_line_count(self, slug: str, session_uuid: str) -> int:
+        """Return the line count last seen for this session, or 0 if never processed."""
+        entry = self.processed_sessions.get(slug, {}).get(session_uuid)
+        if entry is None:
+            return 0
+        if isinstance(entry, dict):
+            return entry.get("line_count", 0)
+        # Legacy format (bare int = ingested_at_ms): treat as fully processed with unknown lines
+        return -1
+
+    def mark_session_processed(self, slug: str, session_uuid: str, line_count: int = 0) -> None:
         if slug not in self.processed_sessions:
             self.processed_sessions[slug] = {}
-        self.processed_sessions[slug][session_uuid] = int(time.time() * 1000)
+        self.processed_sessions[slug][session_uuid] = {
+            "ingested_at": int(time.time() * 1000),
+            "line_count": line_count,
+        }

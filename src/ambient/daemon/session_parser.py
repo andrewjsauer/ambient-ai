@@ -12,11 +12,17 @@ logger = logging.getLogger(__name__)
 _FILE_PATH_RE = re.compile(r'(?:^|["\s])(/[\w./-]+\.[\w]+)')
 
 
-def parse_session_file(path: Path) -> dict | None:
+def parse_session_file(path: Path, skip_lines: int = 0) -> dict | None:
     """Parse a single session JSONL file, extracting prompts, tool calls, and outcomes.
 
+    Args:
+        path: Path to the session JSONL file.
+        skip_lines: Number of lines to skip from the start (for incremental parsing).
+            When > 0, only extracts data from lines after the skip point.
+            Session ID and project are still read from early lines for context.
+
     Returns a dict with session metadata and extracted data, or None if the file
-    cannot be parsed at all.
+    cannot be parsed at all. Includes 'total_lines' for tracking incremental state.
     """
     prompts: list[str] = []
     tools: list[dict] = []
@@ -26,10 +32,12 @@ def parse_session_file(path: Path) -> dict | None:
     project = None
     max_ts: datetime | None = None
     min_ts: datetime | None = None
+    total_lines = 0
 
     try:
         with open(path) as f:
             for line_num, line in enumerate(f, 1):
+                total_lines = line_num
                 line = line.strip()
                 if not line:
                     continue
@@ -43,7 +51,7 @@ def parse_session_file(path: Path) -> dict | None:
                 if not entry_type:
                     continue
 
-                # Track session ID and project from any entry that has them
+                # Always track session ID and project (even in skipped lines)
                 if not session_id and d.get("sessionId"):
                     session_id = d["sessionId"]
                 if not project and d.get("cwd"):
@@ -60,6 +68,10 @@ def parse_session_file(path: Path) -> dict | None:
                             max_ts = ts
                     except (ValueError, TypeError):
                         pass
+
+                # Skip already-processed lines for content extraction
+                if line_num <= skip_lines:
+                    continue
 
                 if entry_type == "user" and not d.get("isMeta"):
                     _extract_user_message(d, prompts)
@@ -90,6 +102,7 @@ def parse_session_file(path: Path) -> dict | None:
         "start_ts": start_ms,
         "end_ts": end_ms,
         "duration_ms": duration_ms,
+        "total_lines": total_lines,
     }
 
 
