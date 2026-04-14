@@ -93,13 +93,14 @@ def _ingest_claude_sessions(config: Config, state: DaemonState) -> None:
             continue
 
         # Build enriched event dict
-        # For incremental updates, timestamps span the full session but
-        # prompts/tools/errors only contain the new portion
+        # For incremental updates, use the new portion's timestamps
+        # so duration and timing reflect only the new activity
+        is_incremental = prev_line_count > 0
         event_dict = {
             "type": "claude_session",
-            "ts_start": parsed["start_ts"],
+            "ts_start": parsed["new_start_ts"] if is_incremental else parsed["start_ts"],
             "ts_end": parsed["end_ts"],
-            "duration_ms": parsed["duration_ms"],
+            "duration_ms": parsed["new_duration_ms"] if is_incremental else parsed["duration_ms"],
             "command": f"claude: {parsed['prompts'][0]}" if parsed["prompts"] else "claude: (continued session)",
             "exit_code": 0,
             "cwd": parsed["project"],

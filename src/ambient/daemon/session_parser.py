@@ -32,6 +32,7 @@ def parse_session_file(path: Path, skip_lines: int = 0) -> dict | None:
     project = None
     max_ts: datetime | None = None
     min_ts: datetime | None = None
+    new_min_ts: datetime | None = None  # first timestamp in the new (non-skipped) portion
     total_lines = 0
 
     try:
@@ -73,6 +74,14 @@ def parse_session_file(path: Path, skip_lines: int = 0) -> dict | None:
                 if line_num <= skip_lines:
                     continue
 
+                # Track the first timestamp in the new portion
+                if new_min_ts is None and ts_str:
+                    try:
+                        new_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        new_min_ts = new_ts
+                    except (ValueError, TypeError):
+                        pass
+
                 if entry_type == "user" and not d.get("isMeta"):
                     _extract_user_message(d, prompts)
                     is_error_count += _count_errors_in_user(d)
@@ -91,6 +100,10 @@ def parse_session_file(path: Path, skip_lines: int = 0) -> dict | None:
     end_ms = int(max_ts.timestamp() * 1000) if max_ts else start_ms
     duration_ms = end_ms - start_ms
 
+    # For incremental parsing, provide the start of the new portion
+    new_start_ms = int(new_min_ts.timestamp() * 1000) if new_min_ts else start_ms
+    new_duration_ms = end_ms - new_start_ms
+
     return {
         "session_id": session_id or path.stem,
         "project": project or "",
@@ -102,6 +115,8 @@ def parse_session_file(path: Path, skip_lines: int = 0) -> dict | None:
         "start_ts": start_ms,
         "end_ts": end_ms,
         "duration_ms": duration_ms,
+        "new_start_ts": new_start_ms,
+        "new_duration_ms": new_duration_ms,
         "total_lines": total_lines,
     }
 
