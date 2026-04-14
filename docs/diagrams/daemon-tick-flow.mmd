@@ -1,0 +1,36 @@
+flowchart TB
+    start([launchd invokes daemon-tick every 30 min]) --> logging[Setup logging to daemon.log]
+    logging --> dotenv[load_dotenv ~/.ambient/.env]
+    dotenv --> gate1{API key set?}
+    gate1 -- No --> skip1[Log: no API key, exit]
+    gate1 -- Yes --> load_state[Load DaemonState from state.json]
+    load_state --> cursor[Convert cursor to datetime]
+    cursor --> read[read_events since cursor]
+    read --> gate2{New events?}
+    gate2 -- No --> gate3_no{Acquire lock?}
+    gate2 -- Yes --> gate3{Acquire lock?}
+    gate3 -- No --> skip3[Log: locked, exit]
+    gate3 -- Yes --> analyze[Run analysis pipeline]
+    gate3_no -- No --> skip3
+    gate3_no -- Yes --> summaries_no[Check summaries catch-up]
+
+    analyze --> update_cursor[Update cursor to latest ts_start + 1]
+    update_cursor --> increment[Increment events_since_calibration]
+    increment --> save1[Save state immediately]
+    save1 --> summaries[Check summaries catch-up]
+    summaries --> recal[Check recalibration]
+    recal --> save2[Save state again]
+    save2 --> done[Log: tick complete]
+    done --> release[Release lock]
+
+    summaries_no --> save_no[Save state]
+    save_no --> release_no[Release lock]
+
+    subgraph analysis [Analysis Pipeline]
+        direction TB
+        detect_comp[detect_compression] --> detect_pause[classify pauses]
+        detect_pause --> narrate[narrate_batch via Haiku API]
+        narrate --> append[Append to analysis-YYYY-MM-DD.jsonl]
+    end
+
+    analyze --> analysis

@@ -1,0 +1,58 @@
+flowchart TB
+    subgraph src [src/ambient/]
+        cli[cli.py - CLI entry point + 12 commands]
+        config[config.py - Config dataclass + path helpers]
+
+        subgraph capture_pkg [capture/]
+            hooks[hooks.zsh - zsh preexec/precmd]
+            reader[reader.py - Event dataclass + JSONL reader]
+        end
+
+        subgraph detect_pkg [detect/]
+            compression[compression.py - subsequence detection]
+            pauses_mod[pauses.py - GMM classifier + calibration]
+            changepoints[changepoints.py - PELT detection]
+        end
+
+        subgraph present_pkg [present/]
+            narrator[narrator.py - API calls + JSONL/MD output]
+            prompts[prompts.py - system + batch + daily prompts]
+        end
+
+        subgraph daemon_pkg [daemon/ - NEW]
+            tick[tick.py - daemon_tick + gate sequence]
+            state[state.py - DaemonState dataclass]
+            lock[lock.py - PID lock file]
+            launchd[launchd.py - plist generation]
+        end
+    end
+
+    subgraph tests [tests/]
+        t_cli[test_cli.py]
+        t_reader[test_reader.py]
+        t_comp[test_compression.py]
+        t_pause[test_pauses.py]
+        t_cp[test_changepoints.py]
+        t_narr[test_narrator.py]
+        t_state[test_daemon_state.py - NEW]
+        t_lock[test_daemon_lock.py - NEW]
+        t_tick[test_daemon_tick.py - NEW]
+        t_ld[test_daemon_launchd.py - NEW]
+        t_dcli[test_daemon_cli.py - NEW]
+    end
+
+    subgraph runtime [~/.ambient/ - runtime data]
+        logs[logs/events-YYYY-MM-DD.jsonl]
+        analysis_dir[analysis/analysis-YYYY-MM-DD.jsonl]
+        summary_dir[analysis/summary-YYYY-MM-DD.md]
+        models[models/gmm.joblib]
+        daemon_dir[daemon/state.json + daemon.lock + daemon.log]
+        env[.env - API key for launchd]
+    end
+
+    style daemon_pkg fill:#e6f3ff,stroke:#4a90d9
+    style t_state fill:#e6f3ff,stroke:#4a90d9
+    style t_lock fill:#e6f3ff,stroke:#4a90d9
+    style t_tick fill:#e6f3ff,stroke:#4a90d9
+    style t_ld fill:#e6f3ff,stroke:#4a90d9
+    style t_dcli fill:#e6f3ff,stroke:#4a90d9

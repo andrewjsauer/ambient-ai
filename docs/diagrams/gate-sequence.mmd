@@ -1,0 +1,24 @@
+flowchart TB
+    start([daemon_tick invoked]) --> g1{Gate 1: API key?}
+    g1 -- "Missing" --> exit1[Log + exit]
+    g1 -- "Present" --> load[Load state.json]
+    load --> g2{Gate 2: New events since cursor?}
+    g2 -- "None" --> g3a{Gate 3: Acquire lock?}
+    g2 -- "Events found" --> g3b{Gate 3: Acquire lock?}
+
+    g3a -- "Locked" --> exit3a[Log + exit]
+    g3a -- "Acquired" --> summary_only[Summary catch-up only]
+    summary_only --> release_a[Release lock]
+
+    g3b -- "Locked" --> exit3b[Log + exit]
+    g3b -- "Acquired" --> full[Full tick: analyze + summary + recal]
+    full --> release_b[Release lock]
+
+    style exit1 fill:#f96
+    style exit3a fill:#f96
+    style exit3b fill:#f96
+    style summary_only fill:#9f9
+    style full fill:#9f9
+
+    note1[Gate ordering: cheapest check first\n1. API key = env var check\n2. Events = file read\n3. Lock = file write]
+    style note1 fill:#fff,stroke:#999,stroke-dasharray:5

@@ -1,0 +1,53 @@
+flowchart LR
+    subgraph Input
+        EVENTS[Event stream<br>commands + sessions]
+    end
+
+    subgraph Session Classification
+        EVENTS --> FILTER{type =<br>claude_session?}
+        FILTER -->|Yes| CLASSIFY[classify_session_outcome]
+        FILTER -->|No| SKIP([Skip])
+
+        CLASSIFY --> QUICK{prompts < 5<br>AND tools < 3?}
+        QUICK -->|Yes| Q_OUT[Quick]
+        QUICK -->|No| ABANDON{prompts > 1<br>no Write/Edit<br>errors > 0<br>duration > 5m?}
+        ABANDON -->|Yes| A_OUT[Abandoned]
+        ABANDON -->|No| FRICTION{thrash score<br>> 0.5?}
+        FRICTION -->|Yes| F_OUT[Friction]
+        FRICTION -->|No| P_OUT[Productive]
+    end
+
+    subgraph Thrash Score
+        CLASSIFY --> THRASH[error_count / prompt_count<br>floor: 3 prompts]
+    end
+
+    subgraph Stuck Patterns
+        F_OUT --> GROUP[Group by project]
+        A_OUT --> GROUP
+        GROUP --> PATTERNS[StuckPattern<br>project + files + tools<br>episode count + avg thrash]
+    end
+
+    subgraph Resolution Velocity
+        EVENTS --> CHAINS[detect_resolution_chains]
+        CHAINS --> FAIL{Failed<br>command?}
+        FAIL -->|Yes| OPEN[Open chain]
+        OPEN --> CLAUDE{Claude<br>session?}
+        CLAUDE -->|Yes| EXTEND[Add to chain<br>track outcome]
+        EXTEND --> SUCCESS{Matching<br>success cmd?}
+        SUCCESS -->|Yes| RESOLVE[Resolved chain<br>measure active time]
+        SUCCESS -->|No| IDLE{Gap > 15m?}
+        IDLE -->|Yes| BREAK[Break chain<br>unresolved]
+        IDLE -->|No| CLAUDE
+    end
+
+    subgraph Output
+        PATTERNS --> INSIGHTS[ambient insights<br>coaching report]
+        RESOLVE --> METRICS[VelocityMetrics<br>avg / median / p90]
+        METRICS --> INSIGHTS
+        PATTERNS --> QUALITY{Quality gate<br>3+ episodes?}
+        QUALITY -->|Yes| REC[Coaching<br>recommendation]
+        QUALITY -->|No| REPORT_ONLY[Report only]
+    end
+
+    style Input fill:#264653,stroke:#2a9d8f,color:#fff
+    style Output fill:#264653,stroke:#e76f51,color:#fff

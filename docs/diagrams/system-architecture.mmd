@@ -1,0 +1,70 @@
+flowchart TB
+    subgraph capture [Event Capture Layer]
+        hooks[zsh preexec/precmd hooks]
+        hooks --> events[(events-YYYY-MM-DD.jsonl)]
+    end
+
+    subgraph daemon [Daemon Layer - launchd every 30min]
+        tick[daemon_tick]
+        tick --> gates{Gate Sequence}
+        gates --> analysis_pipe[Analysis Pipeline]
+        gates --> summary_pipe[Summary Catch-up]
+        gates --> recal_pipe[Recalibration Check]
+
+        analysis_pipe --> compression[detect_compression]
+        analysis_pipe --> pauses_classify[classify pauses]
+        analysis_pipe --> haiku_api[Claude Haiku API]
+
+        summary_pipe --> changepoints[detect_changepoints]
+        summary_pipe --> sonnet_api[Claude Sonnet API]
+
+        recal_pipe --> gmm_fit[GMM calibrate]
+    end
+
+    subgraph state_mgmt [State Management]
+        state[(state.json)]
+        lock[(daemon.lock)]
+        dotenv[(.env)]
+        log[(daemon.log)]
+    end
+
+    subgraph detect [Detection Algorithms]
+        compression_algo[Subsequence Compression]
+        pause_algo[GMM Pause Classification]
+        changepoint_algo[PELT Changepoints]
+    end
+
+    subgraph output [Output Layer]
+        analysis_out[(analysis-YYYY-MM-DD.jsonl)]
+        summary_out[(summary-YYYY-MM-DD.md)]
+        gmm_model[(gmm.joblib)]
+    end
+
+    subgraph cli [CLI Commands]
+        daemon_start[ambient daemon-start]
+        daemon_stop[ambient daemon-stop]
+        daemon_status[ambient daemon-status]
+        manual_analyze[ambient analyze]
+        manual_summary[ambient summary]
+        manual_review[ambient review]
+        manual_stats[ambient stats]
+    end
+
+    events --> tick
+    state --> tick
+    lock --> tick
+    dotenv --> tick
+
+    compression --> analysis_out
+    haiku_api --> analysis_out
+    sonnet_api --> summary_out
+    gmm_fit --> gmm_model
+
+    daemon_start --> plist[launchd plist]
+    plist --> tick
+    daemon_stop --> plist
+    daemon_status --> state
+
+    manual_analyze --> analysis_out
+    manual_summary --> summary_out
+    manual_review --> summary_out

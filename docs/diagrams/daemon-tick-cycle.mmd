@@ -1,0 +1,38 @@
+flowchart TD
+    START([daemon_tick]) --> APIKEY{API key<br>loaded?}
+    APIKEY -->|No| SKIP_EXIT([Exit: no key])
+    APIKEY -->|Yes| CLIENT[Create shared<br>Anthropic client]
+    CLIENT --> LOAD_STATE[Load DaemonState<br>from state.json]
+    LOAD_STATE --> INGEST[Ingest Claude sessions<br>incremental parsing]
+    INGEST --> GET_EVENTS[Read new events<br>since cursor]
+    GET_EVENTS --> LOCK{Acquire<br>lock?}
+    LOCK -->|No| LOCK_EXIT([Exit: locked])
+    LOCK -->|Yes| HAS_EVENTS{New events?}
+
+    HAS_EVENTS -->|No| CHECK_SUMMARIES
+    HAS_EVENTS -->|Yes| ANALYSIS[Run detectors<br>+ Haiku batch]
+
+    ANALYSIS --> ADVANCE[Advance cursor<br>save state]
+    ADVANCE --> CHECK_SUMMARIES[Check missing<br>daily summaries]
+
+    CHECK_SUMMARIES --> GEN_SUMMARY{Missing<br>summary?}
+    GEN_SUMMARY -->|Yes| DAILY[Generate daily<br>Sonnet summary]
+    DAILY --> RECS[Generate<br>recommendations]
+    RECS --> COACHING_RECS[Generate coaching<br>recommendations]
+    COACHING_RECS --> GEN_SUMMARY
+    GEN_SUMMARY -->|No| WEEKLY{Sunday +<br>7 days since last?}
+
+    WEEKLY -->|Yes| WEEKLY_DATA[Gather weekly data<br>+ coaching analysis]
+    WEEKLY_DATA --> WEEKLY_GEN[Generate weekly<br>Sonnet digest]
+    WEEKLY_GEN --> RECAL
+    WEEKLY -->|No| RECAL{Recalibration<br>eligible?}
+
+    RECAL -->|Yes| GMM[Re-fit GMM<br>on all events]
+    GMM --> SAVE
+    RECAL -->|No| SAVE[Save state<br>release lock]
+    SAVE --> DONE([Tick complete])
+
+    style START fill:#2d6a4f,stroke:#1b4332,color:#fff
+    style DONE fill:#2d6a4f,stroke:#1b4332,color:#fff
+    style SKIP_EXIT fill:#9d0208,stroke:#6a040f,color:#fff
+    style LOCK_EXIT fill:#9d0208,stroke:#6a040f,color:#fff

@@ -1,0 +1,35 @@
+flowchart TD
+    START([discover_session_files]) --> SCAN[Scan ~/.claude/projects/*//*.jsonl]
+    SCAN --> LOOP{Next file?}
+
+    LOOP -->|Yes| MTIME{Modified<br>> 30 min ago?}
+    MTIME -->|No| LOOP
+    MTIME -->|Yes| PREV[get_session_line_count<br>from state]
+
+    PREV --> LEGACY{Legacy entry<br>line_count = -1?}
+    LEGACY -->|Yes| LOOP
+    LEGACY -->|No| PARSE[parse_session_file<br>skip_lines = prev_count]
+
+    PARSE --> GREW{total_lines ><br>prev_count?}
+    GREW -->|No| LOOP
+    GREW -->|Yes| CONTENT{New prompts<br>or tools?}
+
+    CONTENT -->|No| UPDATE_ONLY[Update line count<br>in state]
+    UPDATE_ONLY --> LOOP
+
+    CONTENT -->|Yes| INCREMENTAL{prev_count > 0?}
+    INCREMENTAL -->|Yes| INC_EVENT[Emit incremental event<br>ts_start = new portion start<br>duration = new portion only]
+    INCREMENTAL -->|No| FULL_EVENT[Emit full event<br>ts_start = session start<br>duration = full session]
+
+    INC_EVENT --> WRITE[Append to<br>events-YYYY-MM-DD.jsonl]
+    FULL_EVENT --> WRITE
+
+    WRITE --> MARK[mark_session_processed<br>line_count = total_lines]
+    MARK --> LOOP
+
+    LOOP -->|Done| END([Ingestion complete])
+
+    style START fill:#2d6a4f,stroke:#1b4332,color:#fff
+    style END fill:#2d6a4f,stroke:#1b4332,color:#fff
+    style INC_EVENT fill:#e76f51,stroke:#f4a261,color:#fff
+    style FULL_EVENT fill:#264653,stroke:#2a9d8f,color:#fff

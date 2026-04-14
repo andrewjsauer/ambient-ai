@@ -1,0 +1,49 @@
+flowchart TB
+    subgraph Sources
+        TERMINAL[Terminal<br>zsh hooks]
+        CLAUDE_CODE[Claude Code<br>session files]
+    end
+
+    subgraph Storage ["~/.ambient/"]
+        EVENTS_LOG[logs/<br>events-YYYY-MM-DD.jsonl]
+        ANALYSIS_LOG[analysis/<br>analysis-YYYY-MM-DD.jsonl]
+        SUMMARY_MD[analysis/<br>summary-YYYY-MM-DD.md]
+        WEEKLY_MD[analysis/<br>weekly-YYYY-MM-DD.md]
+        INSIGHTS_MD[insights/<br>insights-YYYY-MM-DD.md]
+        RECS_DIR[recommendations/<br>*.md]
+        GMM_MODEL[models/<br>gmm.joblib]
+        STATE[daemon/<br>state.json]
+    end
+
+    subgraph API
+        HAIKU[Claude Haiku<br>batch + skills]
+        SONNET[Claude Sonnet<br>daily + weekly + insights]
+    end
+
+    TERMINAL -->|preexec/precmd<br>append JSONL| EVENTS_LOG
+    CLAUDE_CODE -->|session_parser<br>incremental| EVENTS_LOG
+
+    EVENTS_LOG -->|detectors| ANALYSIS_LOG
+    ANALYSIS_LOG -->|build_batch_prompt| HAIKU
+    HAIKU -->|JSON findings| ANALYSIS_LOG
+
+    ANALYSIS_LOG -->|build_daily_prompt| SONNET
+    SONNET -->|narrative| SUMMARY_MD
+
+    ANALYSIS_LOG -->|build_weekly_prompt<br>+ coaching data| SONNET
+    SONNET -->|trend report| WEEKLY_MD
+
+    EVENTS_LOG -->|aggregate_coaching_data| SONNET
+    SONNET -->|coaching report| INSIGHTS_MD
+
+    EVENTS_LOG -->|prompt patterns<br>+ stuck patterns| HAIKU
+    HAIKU -->|skill/rule drafts| RECS_DIR
+
+    EVENTS_LOG -->|pause gaps| GMM_MODEL
+    GMM_MODEL -->|classifications| ANALYSIS_LOG
+
+    STATE -->|cursors + processed sessions| EVENTS_LOG
+
+    style Sources fill:#003049,stroke:#d62828,color:#fff
+    style Storage fill:#1d3557,stroke:#457b9d,color:#fff
+    style API fill:#6a040f,stroke:#e85d04,color:#fff

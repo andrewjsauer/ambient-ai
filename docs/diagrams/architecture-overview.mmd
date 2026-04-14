@@ -1,0 +1,50 @@
+graph TD
+    subgraph Capture
+        ZSH[zsh hooks<br>preexec/precmd] -->|append| EVENTS[events-YYYY-MM-DD.jsonl]
+        CLAUDE_FILES[~/.claude/projects/<br>session JSONL files] -->|parse incremental| SESSION_PARSER[session_parser.py]
+        SESSION_PARSER -->|append| EVENTS
+    end
+
+    subgraph Detect
+        EVENTS -->|read_events| COMPRESSION[compression.py<br>repeated sequences]
+        EVENTS -->|read_events| PAUSES[pauses.py<br>GMM classifier]
+        EVENTS -->|read_events| CHANGEPOINTS[changepoints.py<br>PELT rhythm]
+        EVENTS -->|read_events| PROJECTS[projects.py<br>time allocation]
+        EVENTS -->|read_events| PROMPTS[prompt_patterns.py<br>repeated prompts]
+        EVENTS -->|read_events| CORRELATOR[correlator.py<br>shell-Claude linking]
+        EVENTS -->|read_events| COACHING[coaching.py<br>session outcomes]
+        EVENTS -->|read_events| VELOCITY[velocity.py<br>resolution chains]
+    end
+
+    subgraph Present
+        COMPRESSION --> BATCH[narrate_batch<br>Haiku]
+        PAUSES --> BATCH
+        PROJECTS --> BATCH
+        PROMPTS --> BATCH
+
+        BATCH --> ANALYSIS[analysis-YYYY-MM-DD.jsonl]
+        ANALYSIS --> DAILY[narrate_daily<br>Sonnet]
+        DAILY --> SUMMARY[summary-YYYY-MM-DD.md]
+
+        ANALYSIS --> WEEKLY[narrate_weekly<br>Sonnet]
+        COACHING --> WEEKLY
+        VELOCITY --> WEEKLY
+        WEEKLY --> WEEKLY_MD[weekly-YYYY-MM-DD.md]
+
+        COACHING --> INSIGHTS[generate_insights_report<br>Sonnet]
+        VELOCITY --> INSIGHTS
+        INSIGHTS --> INSIGHTS_MD[insights-YYYY-MM-DD.md]
+
+        PROMPTS --> RECOMMENDER[recommender.py<br>Haiku]
+        COMPRESSION --> RECOMMENDER
+        COACHING --> COACHING_REC[coaching recs<br>Haiku]
+        VELOCITY --> COACHING_REC
+        RECOMMENDER --> RECS[~/.ambient/recommendations/]
+        COACHING_REC --> RECS
+
+        PAUSES --> NOTIFY[notify.py<br>macOS notification]
+    end
+
+    style Capture fill:#1a1a2e,stroke:#e94560,color:#fff
+    style Detect fill:#16213e,stroke:#0f3460,color:#fff
+    style Present fill:#0f3460,stroke:#533483,color:#fff
