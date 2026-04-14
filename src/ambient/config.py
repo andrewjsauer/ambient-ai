@@ -40,6 +40,8 @@ class Config:
     # Coaching / thrash detection
     thrash_score_threshold: float = 0.5
     thrash_min_prompts: int = 3
+    # Minimum qualifying sessions before pooling thrash into averages.
+    thrash_aggregate_min_n: int = 5
 
     # Resolution velocity
     velocity_idle_break_ms: int = 900_000  # 15 minutes

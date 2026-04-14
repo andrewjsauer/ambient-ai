@@ -24,6 +24,7 @@ class CoachingFindings:
     outcomes: list[SessionOutcome] = field(default_factory=list)
     count_by_classification: dict[str, int] = field(default_factory=dict)
     avg_thrash_score: float | None = None
+    low_sample: bool = False
 
 
 @dataclass
@@ -32,7 +33,7 @@ class StuckPattern:
     file_cluster: list[str]
     failing_tools: list[str]
     episode_count: int
-    avg_thrash_score: float
+    avg_thrash_score: float | None
     total_duration_ms: int
     session_ids: list[str]
 
@@ -116,18 +117,25 @@ def classify_sessions(events: list[Event], config: Config) -> CoachingFindings:
         count_by[o.classification] = count_by.get(o.classification, 0) + 1
 
     scores = [o.thrash_score for o in outcomes if o.thrash_score is not None]
-    avg_score = sum(scores) / len(scores) if scores else None
+    if len(scores) >= config.thrash_aggregate_min_n:
+        avg_score = sum(scores) / len(scores)
+        low_sample = False
+    else:
+        avg_score = None
+        low_sample = 0 < len(scores) < config.thrash_aggregate_min_n
 
     return CoachingFindings(
         outcomes=outcomes,
         count_by_classification=count_by,
         avg_thrash_score=avg_score,
+        low_sample=low_sample,
     )
 
 
 def group_stuck_patterns(
     outcomes: list[SessionOutcome],
     events: list[Event],
+    config: Config,
 ) -> StuckPatternFindings:
     # Filter to Friction and Abandoned outcomes
     stuck = [o for o in outcomes if o.classification in ("friction", "abandoned")]
@@ -161,7 +169,10 @@ def group_stuck_patterns(
         unique_files = sorted(set(all_files)) if all_files else ["unknown"]
         unique_tools = sorted(set(all_tool_names)) if all_tool_names else ["unknown"]
 
-        avg_thrash = sum(thrash_scores) / len(thrash_scores) if thrash_scores else 0.0
+        if len(thrash_scores) >= config.thrash_aggregate_min_n:
+            avg_thrash = sum(thrash_scores) / len(thrash_scores)
+        else:
+            avg_thrash = None
 
         patterns.append(StuckPattern(
             project=project,

@@ -225,7 +225,7 @@ def _check_summaries(config: Config, state: DaemonState, client=None) -> None:
                     from ambient.present.recommender import generate_coaching_recommendations
 
                     coaching = classify_sessions(events, config)
-                    stuck = group_stuck_patterns(coaching.outcomes, events)
+                    stuck = group_stuck_patterns(coaching.outcomes, events, config)
                     outcome_map = {o.session_id: o.classification for o in coaching.outcomes}
                     chains = detect_resolution_chains(events, config, session_outcomes=outcome_map)
                     velocity = compute_velocity_metrics(chains, min_chains=config.velocity_min_chains)
@@ -309,7 +309,7 @@ def _check_weekly_summary(config: Config, state: DaemonState, client=None) -> No
 
         if week_events:
             coaching = classify_sessions(week_events, config)
-            stuck = group_stuck_patterns(coaching.outcomes, week_events)
+            stuck = group_stuck_patterns(coaching.outcomes, week_events, config)
             outcome_map = {o.session_id: o.classification for o in coaching.outcomes}
             chains = detect_resolution_chains(week_events, config, session_outcomes=outcome_map)
             velocity = compute_velocity_metrics(chains)
@@ -321,6 +321,7 @@ def _check_weekly_summary(config: Config, state: DaemonState, client=None) -> No
                     "avg_ms": velocity.avg_ms,
                     "resolved_count": velocity.resolved_count,
                 },
+                "closure_reasons": velocity.by_reason,
                 "stuck_patterns": [
                     {
                         "project": p.project,

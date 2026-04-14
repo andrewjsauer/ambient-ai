@@ -160,18 +160,38 @@ class TestClassifySessions:
 
     def test_avg_thrash_score(self):
         events = [
-            _make_session(prompt_count=6, error_count=3, tools=[{"name": "Write", "files": []}] * 4, session_id="s1"),
-            _make_session(prompt_count=6, error_count=1, tools=[{"name": "Write", "files": []}] * 4, session_id="s2"),
+            _make_session(prompt_count=6, error_count=3, tools=[{"name": "Write", "files": []}] * 4, session_id=f"s{i}")
+            for i in range(5)
         ]
         findings = classify_sessions(events, _config())
         assert findings.avg_thrash_score is not None
-        # (3/6 + 1/6) / 2 = 0.333...
-        assert abs(findings.avg_thrash_score - (0.5 + 1 / 6) / 2) < 0.01
+        assert findings.low_sample is False
+        assert abs(findings.avg_thrash_score - 0.5) < 0.01
+
+    def test_avg_thrash_score_low_sample_gated(self):
+        """4 scoring sessions → avg None, low_sample True."""
+        events = [
+            _make_session(prompt_count=6, error_count=3, tools=[{"name": "Write", "files": []}] * 4, session_id=f"s{i}")
+            for i in range(4)
+        ]
+        findings = classify_sessions(events, _config())
+        assert findings.avg_thrash_score is None
+        assert findings.low_sample is True
 
     def test_no_sessions(self):
         findings = classify_sessions([], _config())
         assert findings.outcomes == []
         assert findings.avg_thrash_score is None
+        assert findings.low_sample is False
+
+    def test_zero_scoring_sessions_not_low_sample(self):
+        """0 thrash-scoring sessions → avg None, low_sample False (nothing to aggregate)."""
+        events = [
+            _make_session(prompt_count=2, error_count=0, tools=[], session_id="s1"),
+        ]
+        findings = classify_sessions(events, _config())
+        assert findings.avg_thrash_score is None
+        assert findings.low_sample is False
 
 
 # ── Unit 13: Stuck Pattern Grouping ──
@@ -187,7 +207,7 @@ class TestGroupStuckPatterns:
             for i in range(3)
         ]
         findings = classify_sessions(events, _config())
-        stuck = group_stuck_patterns(findings.outcomes, events)
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
         assert stuck.total_stuck_sessions == 3
         assert len(stuck.patterns) == 1
         assert stuck.patterns[0].project == "auth"
@@ -201,7 +221,7 @@ class TestGroupStuckPatterns:
         e2 = _make_session(prompt_count=6, error_count=5, project="frontend",
                            tools=[{"name": "Bash", "files": []}] * 4, session_id="s2")
         findings = classify_sessions([e1, e2], _config())
-        stuck = group_stuck_patterns(findings.outcomes, [e1, e2])
+        stuck = group_stuck_patterns(findings.outcomes, [e1, e2], _config())
         assert stuck.total_stuck_sessions == 2
         assert len(stuck.patterns) == 2
         projects = {p.project for p in stuck.patterns}
@@ -213,7 +233,7 @@ class TestGroupStuckPatterns:
                               tools=[{"name": "Bash", "files": []}] * 4,
                               files=None, session_id="s1")
         findings = classify_sessions([event], _config())
-        stuck = group_stuck_patterns(findings.outcomes, [event])
+        stuck = group_stuck_patterns(findings.outcomes, [event], _config())
         assert stuck.patterns[0].file_cluster == ["unknown"]
 
     def test_no_stuck_sessions(self):
@@ -221,7 +241,7 @@ class TestGroupStuckPatterns:
         event = _make_session(prompt_count=10, error_count=0,
                               tools=[{"name": "Write", "files": []}] * 4, session_id="s1")
         findings = classify_sessions([event], _config())
-        stuck = group_stuck_patterns(findings.outcomes, [event])
+        stuck = group_stuck_patterns(findings.outcomes, [event], _config())
         assert stuck.total_stuck_sessions == 0
         assert stuck.patterns == []
 
@@ -233,7 +253,7 @@ class TestGroupStuckPatterns:
                                   tools=[{"name": "Read", "files": []}, {"name": "Bash", "files": []}],
                                   duration_ms=600_000, session_id="s2")
         findings = classify_sessions([friction, abandoned], _config())
-        stuck = group_stuck_patterns(findings.outcomes, [friction, abandoned])
+        stuck = group_stuck_patterns(findings.outcomes, [friction, abandoned], _config())
         assert stuck.total_stuck_sessions == 2
         assert stuck.patterns[0].episode_count == 2
 
@@ -249,8 +269,35 @@ class TestGroupStuckPatterns:
                                     tools=[{"name": "Bash", "files": []}] * 4, session_id="fe-1"))
 
         findings = classify_sessions(events, _config())
-        stuck = group_stuck_patterns(findings.outcomes, events)
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
         assert stuck.patterns[0].project == "auth"
         assert stuck.patterns[0].episode_count == 3
         assert stuck.patterns[1].project == "frontend"
         assert stuck.patterns[1].episode_count == 1
+
+    def test_pattern_low_sample_thrash_none(self):
+        """StuckPattern with 2 scoring sessions → avg_thrash_score is None."""
+        events = [
+            _make_session(prompt_count=6, error_count=5, project="auth",
+                          tools=[{"name": "Bash", "files": []}] * 4,
+                          files=["src/auth.py"], session_id=f"s{i}")
+            for i in range(2)
+        ]
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        assert len(stuck.patterns) == 1
+        assert stuck.patterns[0].avg_thrash_score is None
+
+    def test_pattern_enough_samples_thrash_float(self):
+        """StuckPattern with 6 scoring sessions → avg_thrash_score is a float."""
+        events = [
+            _make_session(prompt_count=6, error_count=5, project="auth",
+                          tools=[{"name": "Bash", "files": []}] * 4,
+                          files=["src/auth.py"], session_id=f"s{i}")
+            for i in range(6)
+        ]
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        assert len(stuck.patterns) == 1
+        assert stuck.patterns[0].avg_thrash_score is not None
+        assert isinstance(stuck.patterns[0].avg_thrash_score, float)

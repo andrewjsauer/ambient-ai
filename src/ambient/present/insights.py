@@ -53,7 +53,7 @@ def aggregate_coaching_data(config: Config, window_days: int = 7) -> CoachingDat
     events = read_events(config, start=start, end=end)
 
     findings = classify_sessions(events, config)
-    stuck = group_stuck_patterns(findings.outcomes, events)
+    stuck = group_stuck_patterns(findings.outcomes, events, config)
 
     # Build outcome map for velocity tracker
     outcome_map = {o.session_id: o.classification for o in findings.outcomes}
@@ -85,10 +85,20 @@ def build_insights_prompt(data: CoachingData) -> str:
     avg_thrash = data.coaching_findings.avg_thrash_score
     if avg_thrash is not None:
         sections.append(f"  Average thrash score: {avg_thrash:.2f}")
+    elif data.coaching_findings.low_sample:
+        sections.append("  Average thrash score: insufficient sample")
 
     # Resolution velocity
     v = data.velocity_metrics
     sections.append(f"\nRESOLUTION VELOCITY ({v.total_chains} chains, {v.resolved_count} resolved):")
+    if v.by_reason:
+        matched = v.by_reason.get("matched_success", 0)
+        idle = v.by_reason.get("idle_break", 0)
+        eow = v.by_reason.get("end_of_window", 0)
+        sections.append(
+            f"  Closure reasons: matched-success={matched}, "
+            f"idle-break={idle}, end-of-window={eow}"
+        )
     if v.resolved_count > 0:
         sections.append(f"  Average active time: {v.avg_ms / 1000:.0f}s ({v.avg_ms / 60000:.1f}min)")
         sections.append(f"  Median: {v.median_ms / 1000:.0f}s")
@@ -106,9 +116,14 @@ def build_insights_prompt(data: CoachingData) -> str:
     sections.append(f"\nSTUCK PATTERNS ({sp.total_stuck_sessions} stuck sessions):")
     if sp.patterns:
         for p in sp.patterns[:5]:
+            thrash_str = (
+                f"avg thrash {p.avg_thrash_score:.2f}"
+                if p.avg_thrash_score is not None
+                else "thrash N/A (low sample)"
+            )
             sections.append(
                 f"  {p.project}: {p.episode_count} episodes, "
-                f"avg thrash {p.avg_thrash_score:.2f}, "
+                f"{thrash_str}, "
                 f"tools: {', '.join(p.failing_tools)}, "
                 f"total time: {p.total_duration_ms / 60000:.1f}min"
             )

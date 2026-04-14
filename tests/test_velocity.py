@@ -163,13 +163,13 @@ class TestComputeVelocityMetrics:
                 initial_failure_ts=0, initial_command="pytest",
                 claude_session_ids=["s1"], resolution_ts=100000,
                 resolution_command="pytest", active_time_ms=60_000,
-                wall_time_ms=100000, project="auth", outcome="productive", resolved=True,
+                wall_time_ms=100000, project="auth", outcome="productive", closure_reason="matched_success",
             ),
             ResolutionChain(
                 initial_failure_ts=0, initial_command="pytest",
                 claude_session_ids=["s2"], resolution_ts=200000,
                 resolution_command="pytest", active_time_ms=120_000,
-                wall_time_ms=200000, project="auth", outcome="productive", resolved=True,
+                wall_time_ms=200000, project="auth", outcome="productive", closure_reason="matched_success",
             ),
         ]
         metrics = compute_velocity_metrics(chains)
@@ -184,13 +184,13 @@ class TestComputeVelocityMetrics:
                 initial_failure_ts=0, initial_command="pytest",
                 claude_session_ids=["s1"], resolution_ts=100000,
                 resolution_command="pytest", active_time_ms=60_000,
-                wall_time_ms=100000, project="auth", outcome="productive", resolved=True,
+                wall_time_ms=100000, project="auth", outcome="productive", closure_reason="matched_success",
             ),
             ResolutionChain(
                 initial_failure_ts=0, initial_command="npm test",
                 claude_session_ids=["s2"], resolution_ts=200000,
                 resolution_command="npm test", active_time_ms=30_000,
-                wall_time_ms=200000, project="frontend", outcome="productive", resolved=True,
+                wall_time_ms=200000, project="frontend", outcome="productive", closure_reason="matched_success",
             ),
         ]
         metrics = compute_velocity_metrics(chains)
@@ -205,7 +205,7 @@ class TestComputeVelocityMetrics:
                 initial_failure_ts=0, initial_command="pytest",
                 claude_session_ids=[], resolution_ts=100000,
                 resolution_command="", active_time_ms=60_000,
-                wall_time_ms=100000, project="auth", outcome="productive", resolved=False,
+                wall_time_ms=100000, project="auth", outcome="productive", closure_reason="end_of_window",
             ),
         ]
         metrics = compute_velocity_metrics(chains)
@@ -217,3 +217,97 @@ class TestComputeVelocityMetrics:
         metrics = compute_velocity_metrics([])
         assert metrics.total_chains == 0
         assert metrics.avg_ms == 0
+
+
+class TestClosureReason:
+    def test_matched_success(self):
+        """Fail → Claude → matching success → closure_reason == matched_success."""
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=5000),
+            _session(ts_start=10000, duration_ms=300_000, session_id="s1"),
+            _cmd("pytest", exit_code=0, ts_start=320000, duration_ms=5000),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert len(chains) == 1
+        assert chains[0].closure_reason == "matched_success"
+        assert chains[0].resolved is True
+
+    def test_idle_break(self):
+        """Gap > velocity_idle_break_ms closes open chain with idle_break."""
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=5000),
+            _session(ts_start=10000, duration_ms=60_000, session_id="s1"),
+            # 20 min gap > 15 min idle, then an unrelated event in same project
+            _cmd("pytest", exit_code=1, ts_start=70000 + 1_200_000, duration_ms=5000),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert len(chains) >= 1
+        idle_chains = [c for c in chains if c.closure_reason == "idle_break"]
+        assert len(idle_chains) == 1
+        assert idle_chains[0].resolved is False
+
+    def test_end_of_window(self):
+        """Open chain at end of events closes with end_of_window."""
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=5000),
+            _session(ts_start=10000, duration_ms=60_000, session_id="s1"),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert len(chains) == 1
+        assert chains[0].closure_reason == "end_of_window"
+        assert chains[0].resolved is False
+
+    def test_by_reason_sums_to_total(self):
+        """compute_velocity_metrics.by_reason counts sum to total_chains."""
+        chains = [
+            ResolutionChain(
+                initial_failure_ts=0, initial_command="pytest",
+                claude_session_ids=["s1"], resolution_ts=100000,
+                resolution_command="pytest", active_time_ms=60_000,
+                wall_time_ms=100000, project="auth", outcome="productive",
+                closure_reason="matched_success",
+            ),
+            ResolutionChain(
+                initial_failure_ts=0, initial_command="pytest",
+                claude_session_ids=[], resolution_ts=100000,
+                resolution_command="", active_time_ms=60_000,
+                wall_time_ms=100000, project="auth", outcome="productive",
+                closure_reason="idle_break",
+            ),
+            ResolutionChain(
+                initial_failure_ts=0, initial_command="pytest",
+                claude_session_ids=[], resolution_ts=100000,
+                resolution_command="", active_time_ms=60_000,
+                wall_time_ms=100000, project="auth", outcome="productive",
+                closure_reason="end_of_window",
+            ),
+        ]
+        metrics = compute_velocity_metrics(chains)
+        assert sum(metrics.by_reason.values()) == metrics.total_chains == 3
+        assert metrics.by_reason["matched_success"] == 1
+        assert metrics.by_reason["idle_break"] == 1
+        assert metrics.by_reason["end_of_window"] == 1
+
+    def test_resolved_property_back_compat(self):
+        """resolved property returns True only for matched_success."""
+        c1 = ResolutionChain(
+            initial_failure_ts=0, initial_command="pytest",
+            claude_session_ids=[], resolution_ts=0, resolution_command="",
+            active_time_ms=0, wall_time_ms=0, project="p", outcome="productive",
+            closure_reason="matched_success",
+        )
+        c2 = ResolutionChain(
+            initial_failure_ts=0, initial_command="pytest",
+            claude_session_ids=[], resolution_ts=0, resolution_command="",
+            active_time_ms=0, wall_time_ms=0, project="p", outcome="productive",
+            closure_reason="idle_break",
+        )
+        c3 = ResolutionChain(
+            initial_failure_ts=0, initial_command="pytest",
+            claude_session_ids=[], resolution_ts=0, resolution_command="",
+            active_time_ms=0, wall_time_ms=0, project="p", outcome="productive",
+            closure_reason="end_of_window",
+        )
+        assert c1.resolved is True
+        assert c2.resolved is False
+        assert c3.resolved is False

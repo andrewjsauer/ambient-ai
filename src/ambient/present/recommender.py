@@ -221,11 +221,16 @@ def generate_coaching_recommendations(
 
             tools_str = ", ".join(pattern.failing_tools[:3])
             files_str = ", ".join(pattern.file_cluster[:3])
+            thrash_line = (
+                f"Average thrash score: {pattern.avg_thrash_score:.2f}."
+                if pattern.avg_thrash_score is not None
+                else "Average thrash score: insufficient sample."
+            )
             prompt = (
                 f"A developer keeps getting stuck in the '{pattern.project}' project "
                 f"({pattern.episode_count} episodes, {pattern.total_duration_ms / 60000:.0f} min total). "
                 f"Failing tools: {tools_str}. Files involved: {files_str}. "
-                f"Average thrash score: {pattern.avg_thrash_score:.2f}.\n\n"
+                f"{thrash_line}\n\n"
                 f"Generate a CLAUDE.md rule to help avoid this pattern."
             )
 
@@ -243,7 +248,7 @@ def generate_coaching_recommendations(
                 title=f"Coaching: {pattern.project} stuck pattern ({tools_str})",
                 rationale=(
                     f"{pattern.episode_count} stuck episodes on {pattern.project}, "
-                    f"avg thrash score {pattern.avg_thrash_score:.2f}, "
+                    f"{('avg thrash score ' + format(pattern.avg_thrash_score, '.2f')) if pattern.avg_thrash_score is not None else 'thrash N/A (low sample)'}, "
                     f"{pattern.total_duration_ms / 60000:.0f} min total."
                 ),
                 artifact=artifact,

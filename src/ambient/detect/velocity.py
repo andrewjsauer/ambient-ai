@@ -19,7 +19,13 @@ class ResolutionChain:
     wall_time_ms: int
     project: str
     outcome: str  # worst session outcome in chain
-    resolved: bool
+    closure_reason: str  # "matched_success" | "idle_break" | "end_of_window"
+
+    @property
+    def resolved(self) -> bool:
+        # Back-compat: prior API exposed `resolved: bool`. True iff the chain
+        # was closed by a matching-command success (not idle break / end of window).
+        return self.closure_reason == "matched_success"
 
 
 @dataclass
@@ -30,6 +36,7 @@ class VelocityMetrics:
     total_chains: int = 0
     resolved_count: int = 0
     by_project: dict = field(default_factory=dict)
+    by_reason: dict[str, int] = field(default_factory=dict)
 
 
 def _is_failed_command(event: Event) -> bool:
@@ -107,7 +114,7 @@ def detect_resolution_chains(
                         wall_time_ms=last_event_end - chain_start_ts,
                         project=project,
                         outcome=chain_worst_outcome,
-                        resolved=False,
+                        closure_reason="idle_break",
                     ))
                     chain_start_ts = None
 
@@ -154,7 +161,7 @@ def detect_resolution_chains(
                         wall_time_ms=event.ts_end - chain_start_ts,
                         project=project,
                         outcome=chain_worst_outcome,
-                        resolved=True,
+                        closure_reason="matched_success",
                     ))
                     chain_start_ts = None
 
@@ -170,7 +177,7 @@ def detect_resolution_chains(
                 wall_time_ms=last_event_end - chain_start_ts,
                 project=project,
                 outcome=chain_worst_outcome,
-                resolved=False,
+                closure_reason="end_of_window",
             ))
 
     return chains
@@ -190,9 +197,14 @@ def compute_velocity_metrics(
     resolved = [c for c in chains if c.resolved]
     active_times = [c.active_time_ms for c in resolved]
 
+    by_reason: dict[str, int] = {}
+    for c in chains:
+        by_reason[c.closure_reason] = by_reason.get(c.closure_reason, 0) + 1
+
     metrics = VelocityMetrics(
         total_chains=len(chains),
         resolved_count=len(resolved),
+        by_reason=by_reason,
     )
 
     if active_times:
