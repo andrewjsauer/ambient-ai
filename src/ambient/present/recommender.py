@@ -195,7 +195,9 @@ def _generate_alias_recommendation(seq: dict) -> Recommendation | None:
 
 COACHING_RULE_SYSTEM = """You are generating a CLAUDE.md rule for a developer who repeatedly gets stuck on a specific type of task. Create a concise, actionable rule that helps Claude Code avoid the pattern.
 
-Return ONLY the rule text, ready to append to a CLAUDE.md file. Format as a bullet point starting with "- ". Keep it to 1-3 sentences. Be specific about the project/tool context."""
+Return ONLY the rule text, ready to append to a CLAUDE.md file. Format as a bullet point starting with "- ". Keep it to 1-3 sentences. Be specific about the project/tool context.
+
+Only reference actual CLI commands from this list: `ambient insights`, `ambient stats`, `ambient analyze`, `ambient summary`, `ambient daemon-start`, `ambient daemon-stop`, `ambient daemon-status`. Do not invent commands, flags, or subcommands. When confidence is low, hedge or decline rather than asserting patterns."""
 
 
 def generate_coaching_recommendations(
@@ -207,16 +209,16 @@ def generate_coaching_recommendations(
     """Generate recommendations from coaching insights with quality gate.
 
     Quality gate: only generate when:
-    - 3+ stuck episodes on same project, OR
-    - resolution velocity >2x average (with >=3 chains), OR
-    - pattern across 3+ sessions
+    - 5+ stuck episodes on same project, OR
+    - resolution velocity >2x average (with >=5 chains), OR
+    - pattern across 5+ sessions
     """
     recommendations = []
 
     # Stuck pattern recommendations
     if stuck_patterns and hasattr(stuck_patterns, "patterns"):
         for pattern in stuck_patterns.patterns:
-            if pattern.episode_count < 3:
+            if pattern.episode_count < 5:
                 continue
 
             tools_str = ", ".join(pattern.failing_tools[:3])
@@ -226,11 +228,18 @@ def generate_coaching_recommendations(
                 if pattern.avg_thrash_score is not None
                 else "Average thrash score: insufficient sample."
             )
+            if pattern.episode_count <= 7:
+                confidence = "low"
+            elif pattern.episode_count <= 14:
+                confidence = "medium"
+            else:
+                confidence = "high"
             prompt = (
                 f"A developer keeps getting stuck in the '{pattern.project}' project "
                 f"({pattern.episode_count} episodes, {pattern.total_duration_ms / 60000:.0f} min total). "
                 f"Failing tools: {tools_str}. Files involved: {files_str}. "
-                f"{thrash_line}\n\n"
+                f"{thrash_line}\n"
+                f"Sample size: {pattern.episode_count} sessions (confidence: {confidence}).\n\n"
                 f"Generate a CLAUDE.md rule to help avoid this pattern."
             )
 
@@ -258,9 +267,15 @@ def generate_coaching_recommendations(
     # Velocity outlier recommendations
     if velocity_metrics and hasattr(velocity_metrics, "by_project") and velocity_metrics.avg_ms > 0:
         for proj, proj_metrics in velocity_metrics.by_project.items():
-            if proj_metrics.resolved_count < 3:
+            if proj_metrics.resolved_count < 5:
                 continue
             if proj_metrics.avg_ms > velocity_metrics.avg_ms * 2:
+                if proj_metrics.resolved_count <= 7:
+                    sample_phrase = f"based on {proj_metrics.resolved_count} resolved chains — low sample"
+                elif proj_metrics.resolved_count <= 14:
+                    sample_phrase = f"based on {proj_metrics.resolved_count} resolved chains — medium sample"
+                else:
+                    sample_phrase = f"based on {proj_metrics.resolved_count} resolved chains"
                 slug = _slugify(f"{proj}-slow-resolution")
                 recommendations.append(Recommendation(
                     id=f"coaching-{slug}",
@@ -273,7 +288,7 @@ def generate_coaching_recommendations(
                     ),
                     artifact=f"- When working on {proj}, check for common failure patterns before asking Claude. "
                              f"Resolution takes {proj_metrics.avg_ms / 60000:.1f} min on average, "
-                             f"2x longer than other projects.",
+                             f"2x longer than other projects ({sample_phrase}).",
                     source_pattern=f"{proj}: slow resolution",
                 ))
 

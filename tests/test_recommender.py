@@ -5,7 +5,9 @@ import pytest
 
 from ambient.config import Config
 from ambient.present.recommender import (
+    COACHING_RULE_SYSTEM,
     Recommendation,
+    generate_coaching_recommendations,
     generate_recommendations,
     _generate_alias_recommendation,
     _slugify,
@@ -186,3 +188,109 @@ class TestGenerateRecommendations:
         rec_dir = tmp_path / "recommendations"
         files = list(rec_dir.glob("*.md"))
         assert len(files) == 1  # overwritten, not duplicated
+
+
+@dataclass
+class FakeStuckPattern:
+    project: str
+    file_cluster: list[str]
+    failing_tools: list[str]
+    episode_count: int
+    avg_thrash_score: float | None
+    total_duration_ms: int
+    session_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class FakeStuckPatternFindings:
+    patterns: list[FakeStuckPattern] = field(default_factory=list)
+    total_stuck_sessions: int = 0
+
+
+@dataclass
+class FakeProjectVelocity:
+    avg_ms: int = 0
+    resolved_count: int = 0
+
+
+@dataclass
+class FakeVelocityMetrics:
+    avg_ms: int = 0
+    by_project: dict = field(default_factory=dict)
+
+
+def _make_pattern(episode_count: int) -> FakeStuckPatternFindings:
+    return FakeStuckPatternFindings(
+        patterns=[
+            FakeStuckPattern(
+                project="app",
+                file_cluster=["src/foo.py"],
+                failing_tools=["pytest"],
+                episode_count=episode_count,
+                avg_thrash_score=0.6,
+                total_duration_ms=600000,
+            )
+        ]
+    )
+
+
+class TestCoachingRecommendations:
+    def test_system_prompt_contains_whitelist_language(self):
+        assert "Do not invent" in COACHING_RULE_SYSTEM
+        assert "ambient insights" in COACHING_RULE_SYSTEM
+
+    @patch("ambient.present.api.call_api", return_value="- be careful in app")
+    def test_pattern_6_emits_rec_with_low_confidence(self, mock_api, tmp_path):
+        config = Config(base_dir=tmp_path)
+        stuck = _make_pattern(6)
+        recs = generate_coaching_recommendations(stuck, None, config)
+        assert len(recs) == 1
+        # captured user prompt is positional arg 2 of call_api
+        _, args, kwargs = mock_api.mock_calls[0]
+        user_prompt = args[2]
+        assert "Sample size: 6" in user_prompt
+        assert "confidence: low" in user_prompt
+
+    @patch("ambient.present.api.call_api", return_value="- be careful in app")
+    def test_pattern_4_below_gate_no_rec(self, mock_api, tmp_path):
+        config = Config(base_dir=tmp_path)
+        stuck = _make_pattern(4)
+        recs = generate_coaching_recommendations(stuck, None, config)
+        assert recs == []
+        mock_api.assert_not_called()
+
+    @patch("ambient.present.api.call_api", return_value="- rule")
+    def test_pattern_10_medium_confidence(self, mock_api, tmp_path):
+        config = Config(base_dir=tmp_path)
+        stuck = _make_pattern(10)
+        generate_coaching_recommendations(stuck, None, config)
+        user_prompt = mock_api.mock_calls[0].args[2]
+        assert "confidence: medium" in user_prompt
+
+    @patch("ambient.present.api.call_api", return_value="- rule")
+    def test_pattern_20_high_confidence(self, mock_api, tmp_path):
+        config = Config(base_dir=tmp_path)
+        stuck = _make_pattern(20)
+        generate_coaching_recommendations(stuck, None, config)
+        user_prompt = mock_api.mock_calls[0].args[2]
+        assert "confidence: high" in user_prompt
+
+    def test_velocity_outlier_resolved_4_skipped(self, tmp_path):
+        config = Config(base_dir=tmp_path)
+        vm = FakeVelocityMetrics(
+            avg_ms=60000,
+            by_project={"app": FakeProjectVelocity(avg_ms=300000, resolved_count=4)},
+        )
+        recs = generate_coaching_recommendations(None, vm, config)
+        assert recs == []
+
+    def test_velocity_outlier_resolved_5_emits_with_sample_phrase(self, tmp_path):
+        config = Config(base_dir=tmp_path)
+        vm = FakeVelocityMetrics(
+            avg_ms=60000,
+            by_project={"app": FakeProjectVelocity(avg_ms=300000, resolved_count=5)},
+        )
+        recs = generate_coaching_recommendations(None, vm, config)
+        assert len(recs) == 1
+        assert "5 resolved chains" in recs[0].artifact
+        assert "low sample" in recs[0].artifact
