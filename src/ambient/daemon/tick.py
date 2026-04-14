@@ -317,6 +317,7 @@ def _check_weekly_summary(config: Config, state: DaemonState, client=None) -> No
             coaching_data = {
                 "outcomes": coaching.count_by_classification,
                 "avg_thrash_score": coaching.avg_thrash_score,
+                "low_sample": coaching.low_sample,
                 "velocity": {
                     "avg_ms": velocity.avg_ms,
                     "resolved_count": velocity.resolved_count,
