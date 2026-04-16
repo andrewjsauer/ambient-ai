@@ -222,6 +222,86 @@ class TestFirstClaudePrompt:
         assert chains[0].closure_reason == "end_of_window"
 
 
+class TestActiveTimeCap:
+    """Per-event contribution to active_time_ms is capped so long-running
+    foreground processes (dev servers) cannot dominate the metric."""
+
+    def test_command_over_cap_clamped(self):
+        """A make-dev style command running for hours contributes at most the cap."""
+        # Chain: failed pytest (5 s) -> claude (60 s) -> make dev (8 h) success
+        eight_hours_ms = 8 * 60 * 60 * 1000
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1_000_000, duration_ms=5_000),
+            _session(ts_start=1_010_000, duration_ms=60_000, session_id="s1"),
+            _cmd("pytest", exit_code=0, ts_start=1_080_000, duration_ms=eight_hours_ms),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert len(chains) == 1
+        chain = chains[0]
+        assert chain.resolved is True
+        # Expected active time: 5 s + 60 s + 600 s (cap) = 665 s
+        expected = 5_000 + 60_000 + 600_000
+        assert chain.active_time_ms == expected
+        # Wall time is unaffected (still reflects real elapsed time)
+        assert chain.wall_time_ms > chain.active_time_ms
+
+    def test_session_over_cap_clamped(self):
+        """A 4-hour Claude session contributes at most the session cap (60 min)."""
+        four_hours_ms = 4 * 60 * 60 * 1000
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1_000_000, duration_ms=5_000),
+            _session(ts_start=1_010_000, duration_ms=four_hours_ms, session_id="s1"),
+            _cmd("pytest", exit_code=0, ts_start=1_010_000 + four_hours_ms + 1_000,
+                 duration_ms=3_000),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert len(chains) == 1
+        chain = chains[0]
+        # Expected: 5 s + 3600 s (session cap) + 3 s = 3608 s
+        expected = 5_000 + 3_600_000 + 3_000
+        assert chain.active_time_ms == expected
+
+    def test_initial_failed_command_also_capped(self):
+        """The seeding command for a chain is subject to the same cap."""
+        # A failed `make dev` that ran for 3 hours before finally exiting non-zero
+        three_hours_ms = 3 * 60 * 60 * 1000
+        events = [
+            _cmd("make dev", exit_code=1, ts_start=1_000_000, duration_ms=three_hours_ms),
+            _session(ts_start=1_000_000 + three_hours_ms + 1_000,
+                     duration_ms=60_000, session_id="s1"),
+            _cmd("make dev", exit_code=0,
+                 ts_start=1_000_000 + three_hours_ms + 70_000, duration_ms=2_000),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert len(chains) == 1
+        # Expected: 600_000 (initial cap) + 60_000 + 2_000 = 662_000
+        assert chains[0].active_time_ms == 662_000
+
+    def test_under_cap_unchanged(self):
+        """Events well under the cap contribute their full duration."""
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=5_000),
+            _session(ts_start=10_000, duration_ms=300_000, session_id="s1"),
+            _cmd("pytest", exit_code=0, ts_start=320_000, duration_ms=5_000),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert chains[0].active_time_ms == 5_000 + 300_000 + 5_000
+
+    def test_custom_caps_config(self):
+        """Cap values come from Config, not hardcoded."""
+        config = _config(
+            velocity_max_command_contribution_ms=1_000,  # 1 s cap
+            velocity_max_session_contribution_ms=2_000,  # 2 s cap
+        )
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=10_000),  # capped to 1 s
+            _session(ts_start=15_000, duration_ms=10_000, session_id="s1"),  # capped to 2 s
+            _cmd("pytest", exit_code=0, ts_start=30_000, duration_ms=10_000),  # capped to 1 s
+        ]
+        chains = detect_resolution_chains(events, config)
+        assert chains[0].active_time_ms == 1_000 + 2_000 + 1_000
+
+
 class TestComputeVelocityMetrics:
     def test_basic_metrics(self):
         chains = [

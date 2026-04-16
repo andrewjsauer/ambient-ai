@@ -48,6 +48,11 @@ class Config:
     # Resolution velocity
     velocity_idle_break_ms: int = 900_000  # 15 minutes
     velocity_min_chains: int = 5
+    # Per-event ceilings on contribution to chain active_time_ms. Long-running
+    # foreground processes (dev servers, watchers) should not dominate the
+    # "active debugging time" metric even though they sit inside the chain.
+    velocity_max_command_contribution_ms: int = 600_000  # 10 minutes
+    velocity_max_session_contribution_ms: int = 3_600_000  # 60 minutes
 
     # API
     haiku_model: str = "claude-haiku-4-5"

@@ -59,6 +59,18 @@ def _derive_project(event: Event) -> str:
     return "unknown"
 
 
+def _capped_contribution(event: Event, config: Config) -> int:
+    """Per-event contribution to active_time_ms, capped by event type.
+
+    Long-running foreground processes (e.g., `make dev` dev servers) would
+    otherwise inflate active_time to days. Keep the event in the chain but
+    clamp how much it contributes to the time metric.
+    """
+    if event.type == "claude_session":
+        return min(event.duration_ms, config.velocity_max_session_contribution_ms)
+    return min(event.duration_ms, config.velocity_max_command_contribution_ms)
+
+
 # Outcome severity for "worst wins" logic
 _OUTCOME_SEVERITY = {"productive": 0, "quick": 1, "abandoned": 2, "friction": 3}
 
@@ -131,7 +143,7 @@ def detect_resolution_chains(
                     chain_command = event.command
                     chain_base_cmd = _base_command(event.command)
                     chain_session_ids = []
-                    chain_active_ms = event.duration_ms
+                    chain_active_ms = _capped_contribution(event, config)
                     chain_worst_outcome = "productive"
                     chain_has_claude = False
                     chain_first_prompt = ""
@@ -146,7 +158,7 @@ def detect_resolution_chains(
                 chain_has_claude = True
                 sid = event.claude_session_id or ""
                 chain_session_ids.append(sid)
-                chain_active_ms += event.duration_ms
+                chain_active_ms += _capped_contribution(event, config)
                 # Track worst outcome
                 ev_outcome = outcomes.get(sid, "productive")
                 if _OUTCOME_SEVERITY.get(ev_outcome, 0) > _OUTCOME_SEVERITY.get(chain_worst_outcome, 0):
@@ -154,7 +166,7 @@ def detect_resolution_chains(
                 last_event_end = event.ts_end
 
             elif event.type == "command":
-                chain_active_ms += event.duration_ms
+                chain_active_ms += _capped_contribution(event, config)
                 last_event_end = event.ts_end
 
                 # Check for resolution: success + matching base command + had Claude involvement
