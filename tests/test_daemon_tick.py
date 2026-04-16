@@ -42,6 +42,27 @@ def _make_event(ts_start, command="ls", gap_ms=1000):
     }
 
 
+def _make_claude_session_event(ts_start, session_id="sess-1", duration_ms=60_000):
+    return {
+        "type": "claude_session",
+        "ts_start": ts_start,
+        "ts_end": ts_start + duration_ms,
+        "duration_ms": duration_ms,
+        "command": f"claude: backfilled session {session_id}",
+        "exit_code": 0,
+        "cwd": "/tmp",
+        "tmux_pane": None,
+        "gap_ms": None,
+        "claude_session_id": session_id,
+        "claude_prompts": ["hello"],
+        "claude_tools": [],
+        "claude_files": [],
+        "claude_project": "test",
+        "claude_prompt_count": 1,
+        "claude_is_error_count": 0,
+    }
+
+
 def _write_analysis(config, date_str, count=3):
     path = config.analysis_path(date_str)
     with open(path, "a") as f:
@@ -147,6 +168,67 @@ class TestDaemonTick:
         # Should process all 10 events
         call_args = mock_analysis.call_args
         assert len(call_args[0][1]) == 10
+
+
+class TestCursorWatermark:
+    """Cursor advance uses only command-event timestamps to avoid rewind from
+    backfilled claude_session events whose ts_start can be days old."""
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("ambient.daemon.tick._run_analysis")
+    def test_cursor_ignores_backfilled_claude_sessions(self, mock_analysis, config):
+        """Tick with one recent command + backfilled old claude_sessions advances cursor to command ts, not old session ts."""
+        mock_analysis.return_value = {"analysis": {}}
+        today = datetime.now().strftime("%Y-%m-%d")
+        now_ms = int(datetime.now().timestamp() * 1000)
+        old_ts = now_ms - (3 * 24 * 60 * 60 * 1000)  # 3 days ago
+
+        _write_events(config, today, [
+            _make_event(now_ms - 1000),  # recent command
+            _make_claude_session_event(old_ts, session_id="old-1"),
+            _make_claude_session_event(old_ts + 1000, session_id="old-2"),
+        ])
+        daemon_tick(config)
+        state = DaemonState.load(config.state_path)
+        # Cursor advances to recent command, not ancient session ts
+        assert state.last_analyzed_ts == (now_ms - 1000) + 1
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("ambient.daemon.tick._run_analysis")
+    def test_cursor_unchanged_when_only_claude_sessions(self, mock_analysis, config):
+        """Tick processing only claude_session events (no commands) leaves cursor unchanged."""
+        mock_analysis.return_value = {"analysis": {}}
+        today = datetime.now().strftime("%Y-%m-%d")
+        now_ms = int(datetime.now().timestamp() * 1000)
+        old_ts = now_ms - (2 * 24 * 60 * 60 * 1000)
+
+        # Seed state with a prior cursor
+        prior_cursor = now_ms - 10_000
+        state = DaemonState(last_analyzed_ts=prior_cursor)
+        state.save(config.state_path)
+
+        _write_events(config, today, [
+            _make_claude_session_event(old_ts, session_id="old-1"),
+        ])
+        daemon_tick(config)
+        reloaded = DaemonState.load(config.state_path)
+        # Cursor must not rewind to ancient session ts
+        assert reloaded.last_analyzed_ts == prior_cursor
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("ambient.daemon.tick._run_analysis")
+    def test_cursor_advances_normally_on_command_events(self, mock_analysis, config):
+        """Baseline: pure-command events still advance cursor to latest command ts."""
+        mock_analysis.return_value = {"analysis": {}}
+        today = datetime.now().strftime("%Y-%m-%d")
+        now_ms = int(datetime.now().timestamp() * 1000)
+        _write_events(config, today, [
+            _make_event(now_ms - 5000),
+            _make_event(now_ms - 2000),
+        ])
+        daemon_tick(config)
+        state = DaemonState.load(config.state_path)
+        assert state.last_analyzed_ts == (now_ms - 2000) + 1
 
 
 class TestSummaryCatchup:

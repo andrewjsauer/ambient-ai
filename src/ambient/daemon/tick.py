@@ -421,9 +421,20 @@ def daemon_tick(config: Config) -> None:
             logger.info("Analyzing %d events", len(events))
             _run_analysis(config, events, client=client)
 
-            # Update cursor (exclusive: +1 so boundary event isn't re-read)
-            latest_ts = max(e.ts_start for e in events)
-            state.last_analyzed_ts = latest_ts + 1
+            # Update cursor (exclusive: +1 so boundary event isn't re-read).
+            # Use only command events to compute the watermark: backfilled
+            # claude_session events carry ts_start from days ago, which would
+            # rewind the cursor. The processed_sessions map already prevents
+            # re-ingestion of those sessions on future ticks.
+            command_ts = [e.ts_start for e in events if e.type == "command"]
+            if command_ts:
+                latest_ts = max(command_ts)
+                state.last_analyzed_ts = latest_ts + 1
+            else:
+                logger.debug(
+                    "Cursor unchanged: tick processed %d non-command events only",
+                    len(events),
+                )
             state.events_since_calibration += len(events)
 
             # Save state immediately after cursor update
