@@ -1,5 +1,6 @@
 """Tests for coaching insights module."""
 
+import json
 from unittest.mock import patch
 
 from ambient.capture.reader import Event
@@ -8,6 +9,7 @@ from ambient.detect.coaching import CoachingFindings, SessionOutcome, StuckPatte
 from ambient.detect.velocity import ResolutionChain, VelocityMetrics
 from ambient.present.insights import (
     CoachingData,
+    aggregate_coaching_data,
     build_insights_prompt,
     format_terminal_summary,
     generate_insights_report,
@@ -149,3 +151,81 @@ class TestGenerateInsightsReport:
             narrative = generate_insights_report(data, config)
 
         assert narrative is None
+
+
+def _write_events_for_aggregate(config, date_str, event_dicts):
+    """Append Event-shaped dicts to the daily events log."""
+    path = config.events_path(date_str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        for e in event_dicts:
+            f.write(json.dumps(e) + "\n")
+
+
+class TestAggregateCoachingData:
+    """aggregate_coaching_data runs every detector and returns one aggregate."""
+
+    def test_extended_fields_populated_on_empty_window(self, tmp_path):
+        config = _config(base_dir=tmp_path)
+        data = aggregate_coaching_data(config, window_days=7)
+        # No events → every detector returns an empty-but-shaped result, no None
+        assert data.prompt_patterns is not None
+        assert data.compression is not None
+        assert data.correlations is not None
+        assert data.prompt_patterns.patterns == []
+        assert data.compression.sequences == []
+        assert data.correlations.patterns == []
+
+    def test_correlator_is_invoked_with_real_data(self, tmp_path):
+        """Fail-then-Claude event pair → correlator emits a pattern."""
+        from datetime import datetime
+        config = _config(base_dir=tmp_path)
+        today = datetime.now().strftime("%Y-%m-%d")
+        now_ms = int(datetime.now().timestamp() * 1000)
+
+        # Shell failure 10s before claude session — should match error_then_claude
+        shell_fail = {
+            "ts_start": now_ms - 120_000,
+            "ts_end": now_ms - 115_000,
+            "duration_ms": 5_000,
+            "command": "pytest",
+            "exit_code": 1,
+            "cwd": "/home/user/proj",
+            "tmux_pane": None,
+            "gap_ms": None,
+            "type": "command",
+        }
+        claude = {
+            "ts_start": now_ms - 100_000,
+            "ts_end": now_ms - 10_000,
+            "duration_ms": 90_000,
+            "command": "claude: fix the test",
+            "exit_code": 0,
+            "cwd": "/home/user/proj",
+            "tmux_pane": None,
+            "gap_ms": None,
+            "type": "claude_session",
+            "claude_session_id": "sess-1",
+            "claude_prompts": ["fix the test"],
+            "claude_tools": [],
+            "claude_files": [],
+            "claude_project": "proj",
+            "claude_prompt_count": 1,
+            "claude_is_error_count": 0,
+        }
+        _write_events_for_aggregate(config, today, [shell_fail, claude])
+
+        data = aggregate_coaching_data(config, window_days=7)
+        assert data.correlations.total_correlations >= 1
+        pattern_types = {p.pattern_type for p in data.correlations.patterns}
+        assert "error_then_claude" in pattern_types
+
+    def test_detectors_failure_does_not_crash_aggregate(self, tmp_path):
+        """If a detector raises, aggregate still returns with the default empty."""
+        config = _config(base_dir=tmp_path)
+        with patch(
+            "ambient.present.insights.detect_prompt_patterns",
+            side_effect=RuntimeError("boom"),
+        ):
+            data = aggregate_coaching_data(config, window_days=7)
+        assert data.prompt_patterns.patterns == []

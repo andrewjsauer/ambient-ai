@@ -1,7 +1,14 @@
-"""Coaching insights: aggregate coaching data, build prompts, generate reports."""
+"""Insights aggregate: run every algorithmic detector, hand the result to an LLM.
+
+CoachingData is the single top-level aggregate passed to the insights prompt.
+Despite the name, it carries more than coaching — it is the full detector
+snapshot over a window (prompt patterns, compression sequences, shell↔Claude
+correlations, outcomes, velocity, stuck patterns). Name retained for import
+stability; prefer importing this as the insights aggregate.
+"""
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from ambient.capture.reader import read_events
@@ -11,6 +18,12 @@ from ambient.detect.coaching import (
     StuckPatternFindings,
     classify_sessions,
     group_stuck_patterns,
+)
+from ambient.detect.compression import CompressionFindings, detect_compression
+from ambient.detect.correlator import CorrelationFindings, correlate_signals
+from ambient.detect.prompt_patterns import (
+    PromptPatternFindings,
+    detect_prompt_patterns,
 )
 from ambient.detect.velocity import (
     VelocityMetrics,
@@ -37,12 +50,38 @@ Be direct and specific. Cite numbers from the data. Focus on what the developer 
 
 @dataclass
 class CoachingData:
+    """Top-level insights aggregate.
+
+    Carries every detector output over the window so the LLM prompt can cite
+    concrete examples. Name retained for import stability.
+    """
+
     coaching_findings: CoachingFindings
     stuck_patterns: StuckPatternFindings
     velocity_metrics: VelocityMetrics
     chains: list[ResolutionChain]
     window_days: int
     date_range: str
+    # Extended detector outputs — default-factory so old callers still work.
+    prompt_patterns: PromptPatternFindings = field(
+        default_factory=lambda: PromptPatternFindings(patterns=[], total_prompts=0)
+    )
+    compression: CompressionFindings = field(
+        default_factory=lambda: CompressionFindings(sequences=[], compression_ratio=1.0)
+    )
+    correlations: CorrelationFindings = field(default_factory=CorrelationFindings)
+
+
+def _safe_run(fn, *args, default, label, **kwargs):
+    """Run a detector, logging and substituting `default` on failure.
+
+    Insights must never crash because one detector blew up on odd data.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("INSIGHTS_DETECTOR_FAILED detector=%s error=%s", label, exc)
+        return default
 
 
 def aggregate_coaching_data(config: Config, window_days: int = 7) -> CoachingData:
@@ -60,6 +99,25 @@ def aggregate_coaching_data(config: Config, window_days: int = 7) -> CoachingDat
     chains = detect_resolution_chains(events, config, session_outcomes=outcome_map)
     velocity = compute_velocity_metrics(chains, min_chains=config.velocity_min_chains)
 
+    # Extended detectors — each wrapped so an unexpected failure can't crash
+    # the insights pipeline. All three are pure over `events` so ordering
+    # and reuse are safe.
+    prompt_patterns = _safe_run(
+        detect_prompt_patterns, events, config,
+        default=PromptPatternFindings(patterns=[], total_prompts=0),
+        label="prompt_patterns",
+    )
+    compression = _safe_run(
+        detect_compression, events, config,
+        default=CompressionFindings(sequences=[], compression_ratio=1.0),
+        label="compression",
+    )
+    correlations = _safe_run(
+        correlate_signals, events,
+        default=CorrelationFindings(),
+        label="correlator",
+    )
+
     return CoachingData(
         coaching_findings=findings,
         stuck_patterns=stuck,
@@ -67,6 +125,9 @@ def aggregate_coaching_data(config: Config, window_days: int = 7) -> CoachingDat
         chains=chains,
         window_days=window_days,
         date_range=date_range,
+        prompt_patterns=prompt_patterns,
+        compression=compression,
+        correlations=correlations,
     )
 
 
