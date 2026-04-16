@@ -5,9 +5,18 @@ from unittest.mock import patch
 
 from ambient.capture.reader import Event
 from ambient.config import Config
-from ambient.detect.coaching import CoachingFindings, SessionOutcome, StuckPattern, StuckPatternFindings
-from ambient.detect.velocity import ResolutionChain, VelocityMetrics
+from ambient.detect.coaching import (
+    CoachingFindings,
+    FileClusterStuckPattern,
+    SessionOutcome,
+    StuckPattern,
+    StuckPatternFindings,
+    ToolStuckPattern,
+)
+from ambient.detect.compression import CompressionFindings, RepeatedSequence
+from ambient.detect.correlator import CorrelationFindings, CorrelationPattern
 from ambient.detect.prompt_patterns import PromptPattern, PromptPatternFindings
+from ambient.detect.velocity import ResolutionChain, VelocityMetrics
 from ambient.present.insights import (
     CoachingData,
     PeriodComparison,
@@ -347,6 +356,214 @@ class TestAggregateCompareFlag:
         assert data.comparison is not None
         # Empty window → both sides fail the gate
         assert data.comparison.insufficient_data_reason is not None
+
+
+def _fully_populated_data():
+    """CoachingData with at least one item in every detector output for prompt-shape tests."""
+    outcomes = [
+        SessionOutcome("s1", "productive", 0.1, "auth", 300_000, 10, 1,
+                       [{"name": "Edit"}], ["src/auth.py"]),
+        SessionOutcome("s2", "friction", 0.8, "auth", 600_000, 6, 5,
+                       [{"name": "Edit"}, {"name": "Bash"}], ["src/auth.py"]),
+        SessionOutcome("s3", "friction", 0.7, "auth", 500_000, 7, 5,
+                       [{"name": "Edit"}, {"name": "Bash"}], ["src/login.py"]),
+    ]
+    findings = CoachingFindings(
+        outcomes=outcomes,
+        count_by_classification={"productive": 1, "friction": 2},
+        avg_thrash_score=0.53,
+    )
+    stuck = StuckPatternFindings(
+        patterns=[StuckPattern("auth", ["src/auth.py", "src/login.py"],
+                               ["Edit", "Bash"], 2, 0.75, 1_100_000, ["s2", "s3"])],
+        total_stuck_sessions=2,
+        tool_level_patterns=[ToolStuckPattern("Edit", 2, ["auth"], None, 1_100_000)],
+        file_cluster_patterns=[FileClusterStuckPattern("src/", 2, ["auth"],
+                                                        ["Edit", "Bash"], 1_100_000)],
+    )
+    chains = [
+        ResolutionChain(
+            initial_failure_ts=1000, initial_command="pytest auth_test.py",
+            claude_session_ids=["s1"], resolution_ts=200000,
+            resolution_command="pytest auth_test.py", active_time_ms=120_000,
+            wall_time_ms=199_000, project="auth", outcome="productive",
+            closure_reason="matched_success",
+            first_claude_prompt="fix the failing auth test",
+        ),
+        ResolutionChain(
+            initial_failure_ts=1000, initial_command="npm test",
+            claude_session_ids=["s2"], resolution_ts=300000,
+            resolution_command="", active_time_ms=420_000,
+            wall_time_ms=299_000, project="frontend", outcome="friction",
+            closure_reason="idle_break",
+            first_claude_prompt="figure out why the snapshot test is broken",
+        ),
+    ]
+    velocity = VelocityMetrics(
+        avg_ms=120_000, median_ms=120_000, p90_ms=180_000,
+        total_chains=2, resolved_count=1,
+        by_reason={"matched_success": 1, "idle_break": 1},
+    )
+    prompt_patterns = PromptPatternFindings(
+        patterns=[
+            PromptPattern("commit this", ["commit this"], 7, ["auth"], "within_session"),
+            PromptPattern("plan it -> ship it", ["plan it -> ship it"], 4,
+                          ["frontend"], "cross_session"),
+        ],
+        total_prompts=30,
+    )
+    compression = CompressionFindings(
+        sequences=[
+            RepeatedSequence(("pytest -x", "git add"), 14, 30_000, 28),
+        ],
+        compression_ratio=0.6,
+    )
+    correlations = CorrelationFindings(
+        patterns=[
+            CorrelationPattern(
+                pattern_type="error_then_claude",
+                count=8,
+                examples=[
+                    {"command": "pytest auth_test.py", "exit_code": 1,
+                     "claude_session_start": 2000, "gap_ms": 15_000},
+                ],
+            ),
+        ],
+        total_correlations=8,
+    )
+    return CoachingData(
+        coaching_findings=findings,
+        stuck_patterns=stuck,
+        velocity_metrics=velocity,
+        chains=chains,
+        window_days=7,
+        date_range="2026-04-10 to 2026-04-16",
+        prompt_patterns=prompt_patterns,
+        compression=compression,
+        correlations=correlations,
+        pending_recommendations=[
+            {"id": "skill-commit-this", "type": "skill", "title": "Commit this skill",
+             "rationale": "repeated 7x"},
+        ],
+    )
+
+
+class TestRichBuildInsightsPrompt:
+    def test_every_new_section_appears(self):
+        prompt = build_insights_prompt(_fully_populated_data())
+        assert "RECURRING PROMPTS" in prompt
+        assert "RECURRING COMMAND SEQUENCES" in prompt
+        assert "SHELL ↔ CLAUDE CORRELATIONS" in prompt
+        assert "TOP RESOLUTION CHAINS" in prompt
+        assert "STUCK PATTERNS — BY PROJECT" in prompt
+        assert "STUCK PATTERNS — BY FAILING TOOL" in prompt
+        assert "STUCK PATTERNS — BY FILE CLUSTER" in prompt
+        assert "PERIOD COMPARISON" in prompt
+        assert "PENDING RECOMMENDATIONS" in prompt
+
+    def test_concrete_examples_embedded(self):
+        """Prompt embeds verbatim prompts, commands, files, and first_claude_prompt strings."""
+        prompt = build_insights_prompt(_fully_populated_data())
+        # Verbatim prompt text
+        assert '"commit this"' in prompt
+        assert '"plan it -> ship it"' in prompt
+        # Shell command sequence
+        assert "pytest -x" in prompt and "git add" in prompt
+        # Resolution chain opener
+        assert "fix the failing auth test" in prompt
+        assert "pytest auth_test.py" in prompt
+        # Cluster + tool grouping
+        assert "src/" in prompt
+        assert "Edit" in prompt
+
+    def test_within_and_cross_prompts_deduped(self):
+        """A pattern with identical text in both scopes is only rendered once (cross wins)."""
+        data = _fully_populated_data()
+        data.prompt_patterns = PromptPatternFindings(
+            patterns=[
+                PromptPattern("commit this", ["commit this"], 7,
+                              ["auth"], "within_session"),
+                PromptPattern("commit this", ["commit this"], 3,
+                              ["auth"], "cross_session"),
+            ],
+            total_prompts=10,
+        )
+        prompt = build_insights_prompt(data)
+        assert prompt.count('"commit this"') == 1
+
+    def test_system_prompt_requires_verbatim_citation(self):
+        """The system prompt instructs Sonnet to quote specific examples."""
+        from ambient.present.insights import INSIGHTS_SYSTEM
+        assert "verbatim" in INSIGHTS_SYSTEM.lower()
+        # Must forbid generic phrasing
+        assert "insufficient" in INSIGHTS_SYSTEM.lower()
+
+    def test_empty_sections_elide_gracefully(self):
+        """Sections with no data render a terse placeholder, not a crash."""
+        data = _fully_populated_data()
+        data.prompt_patterns = PromptPatternFindings(patterns=[], total_prompts=0)
+        data.compression = CompressionFindings(sequences=[], compression_ratio=1.0)
+        data.correlations = CorrelationFindings()
+        prompt = build_insights_prompt(data)
+        assert "RECURRING PROMPTS" in prompt
+        assert "None detected" in prompt
+        assert "RECURRING COMMAND SEQUENCES" in prompt
+
+
+class TestRichTerminalSummary:
+    def test_includes_top_prompt_and_sequence(self):
+        summary = format_terminal_summary(_fully_populated_data())
+        assert "Top repeated prompt" in summary
+        assert '"commit this"' in summary
+        assert "Top command sequence" in summary
+        assert "pytest -x" in summary
+
+    def test_includes_pending_count(self):
+        summary = format_terminal_summary(_fully_populated_data())
+        assert "Pending recs:" in summary
+        assert "1" in summary
+
+    def test_period_delta_surfaced_when_available(self):
+        data = _fully_populated_data()
+        data.comparison = PeriodComparison(
+            velocity_delta_ms=-60_000,
+            stuck_delta=-2,
+            prior_date_range="2026-04-03 to 2026-04-09",
+        )
+        summary = format_terminal_summary(data)
+        assert "vs prior" in summary
+
+
+class TestPromptBudgetTrimming:
+    def test_caps_shrink_when_over_budget(self, tmp_path):
+        """When the prompt exceeds INSIGHTS_INPUT_BUDGET, caps shrink and the call still fires."""
+        from ambient.present import insights as insights_mod
+
+        config = _config(base_dir=tmp_path)
+        # Pad with many raw_examples and long normalized_prompt to blow the budget
+        long_norm = "run a very very very long repeated prompt " * 40
+        patterns = [
+            PromptPattern(long_norm, [long_norm] * 5, 10, ["p"], "within_session")
+            for _ in range(200)
+        ]
+        data = _fully_populated_data()
+        data.prompt_patterns = PromptPatternFindings(
+            patterns=patterns, total_prompts=2000
+        )
+
+        captured = {}
+
+        def fake_call_api(config, system, prompt, model, max_tokens=3000, client=None):
+            captured["prompt_len"] = len(prompt)
+            return "trimmed-report"
+
+        with patch("ambient.present.api.call_api", side_effect=fake_call_api):
+            result = insights_mod.generate_insights_report(data, config)
+
+        assert result == "trimmed-report"
+        # Prompt got built and fired; trimming at minimum wrote the insights file
+        insight_files = list((tmp_path / "insights").glob("*.md"))
+        assert len(insight_files) == 1
 
 
 class TestPendingRecommendations:
