@@ -347,3 +347,27 @@ class TestAggregateCompareFlag:
         assert data.comparison is not None
         # Empty window → both sides fail the gate
         assert data.comparison.insufficient_data_reason is not None
+
+
+class TestPendingRecommendations:
+    def test_aggregate_lists_pending(self, tmp_path):
+        config = _config(base_dir=tmp_path)
+        rec_dir = config.recommendations_dir
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        (rec_dir / "skill-commit-push.md").write_text(
+            '---\ntype: skill\ntitle: "Commit and push"\nrationale: "typed 7 times"\n---\n\nbody\n'
+        )
+        (rec_dir / "alias-gp.md").write_text(
+            '---\ntype: alias\ntitle: "gp alias"\nrationale: "sequence run 5x"\n---\n\nalias gp=git push\n'
+        )
+        data = aggregate_coaching_data(config, window_days=7, compare=False)
+        assert len(data.pending_recommendations) == 2
+        ids = {r["id"] for r in data.pending_recommendations}
+        assert ids == {"skill-commit-push", "alias-gp"}
+        types = {r["type"] for r in data.pending_recommendations}
+        assert types == {"skill", "alias"}
+
+    def test_aggregate_empty_when_no_recommendations_dir(self, tmp_path):
+        config = _config(base_dir=tmp_path)
+        data = aggregate_coaching_data(config, window_days=7, compare=False)
+        assert data.pending_recommendations == []

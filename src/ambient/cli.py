@@ -255,22 +255,10 @@ def cmd_calibrate(config: Config, args):
         print(f"\n{result.reason}")
 
 
-def _parse_recommendation_frontmatter(text: str) -> dict:
-    """Parse YAML frontmatter from a recommendation .md file."""
-    match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
-    if not match:
-        return {}
-    meta = {}
-    for line in match.group(1).splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            value = value.strip().strip('"').strip("'")
-            meta[key.strip()] = value
-    return meta
-
-
 def cmd_recommendations(config: Config, args):
-    rec_dir = config.base_dir / "recommendations"
+    from ambient.present.recommender import parse_recommendation_frontmatter
+
+    rec_dir = config.recommendations_dir
     if not rec_dir.exists():
         print("No recommendations directory found.")
         return
@@ -284,15 +272,17 @@ def cmd_recommendations(config: Config, args):
     print("-" * 70)
     for f in files:
         rec_id = f.stem
-        meta = _parse_recommendation_frontmatter(f.read_text())
+        meta = parse_recommendation_frontmatter(f.read_text())
         rec_type = meta.get("type", "unknown")
         title = meta.get("title", rec_id)
         print(f"{rec_id:<30} {rec_type:<10} {title}")
 
 
 def cmd_apply(config: Config, args):
+    from ambient.present.recommender import parse_recommendation_frontmatter
+
     rec_id = args.recommendation_id
-    rec_dir = config.base_dir / "recommendations"
+    rec_dir = config.recommendations_dir
     rec_path = rec_dir / f"{rec_id}.md"
 
     if not rec_path.exists():
@@ -300,7 +290,7 @@ def cmd_apply(config: Config, args):
         sys.exit(1)
 
     text = rec_path.read_text()
-    meta = _parse_recommendation_frontmatter(text)
+    meta = parse_recommendation_frontmatter(text)
     rec_type = meta.get("type", "unknown")
 
     if rec_type != "skill":

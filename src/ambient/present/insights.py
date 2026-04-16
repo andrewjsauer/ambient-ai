@@ -89,6 +89,7 @@ class CoachingData:
     )
     correlations: CorrelationFindings = field(default_factory=CorrelationFindings)
     comparison: PeriodComparison | None = None
+    pending_recommendations: list[dict] = field(default_factory=list)
 
 
 def _safe_run(fn, *args, default, label, **kwargs):
@@ -224,6 +225,17 @@ def aggregate_coaching_data(
         prior_start = prior_end - timedelta(days=window_days)
         prior = _aggregate_window(config, prior_start, prior_end, window_days)
         current.comparison = compute_period_comparison(current, prior, config)
+
+    # Pending recommendations — staged by the daemon, surfaced here for
+    # visibility in the insights report. Deferred import to avoid a cycle
+    # if recommender ever imports insights.
+    from ambient.present.recommender import list_pending_recommendations
+
+    current.pending_recommendations = _safe_run(
+        list_pending_recommendations, config,
+        default=[],
+        label="pending_recommendations",
+    )
 
     return current
 

@@ -98,6 +98,10 @@ class Config:
         return self.base_dir / "insights" / f"insights-{date_str}.md"
 
     @property
+    def recommendations_dir(self) -> Path:
+        return self.base_dir / "recommendations"
+
+    @property
     def gmm_model_path(self) -> Path:
         return self.models_dir / "gmm.joblib"
 

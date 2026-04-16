@@ -3,6 +3,7 @@
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 
@@ -51,6 +52,52 @@ def _slugify(text: str) -> str:
     text = re.sub(r"[^\w\s-]", "", text)
     text = re.sub(r"[\s_]+", "-", text)
     return text[:50].strip("-")
+
+
+def parse_recommendation_frontmatter(text: str) -> dict:
+    """Parse the YAML-ish frontmatter block at the top of a staged recommendation."""
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
+    if not match:
+        return {}
+    meta = {}
+    for line in match.group(1).splitlines():
+        if ":" in line:
+            key, _, value = line.partition(":")
+            value = value.strip().strip('"').strip("'")
+            meta[key.strip()] = value
+    return meta
+
+
+def list_pending_recommendations(config: Config, limit: int = 10) -> list[dict]:
+    """Return up to `limit` pending recommendations, newest first, with metadata only.
+
+    Each entry: {"id", "type", "title", "rationale", "path"}. Bodies are omitted —
+    the insights prompt references staged files by title, not content.
+    """
+    rec_dir = config.recommendations_dir
+    if not rec_dir.exists():
+        return []
+
+    files = sorted(
+        rec_dir.glob("*.md"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )[:limit]
+
+    results: list[dict] = []
+    for f in files:
+        try:
+            meta = parse_recommendation_frontmatter(f.read_text())
+        except OSError:
+            continue
+        results.append({
+            "id": f.stem,
+            "type": meta.get("type", "unknown"),
+            "title": meta.get("title", f.stem),
+            "rationale": meta.get("rationale", ""),
+            "path": str(f),
+        })
+    return results
 
 
 def generate_recommendations(
