@@ -156,6 +156,72 @@ class TestDetectResolutionChains:
         assert chains == []
 
 
+class TestFirstClaudePrompt:
+    def test_populated_from_first_session(self):
+        """first_claude_prompt captures the first prompt of the first claude session in the chain."""
+        session = _session(ts_start=10000, duration_ms=60_000, session_id="s1")
+        session.claude_prompts = ["fix the failing test in auth_test.py"]
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=5000),
+            session,
+            _cmd("pytest", exit_code=0, ts_start=80000, duration_ms=5000),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert len(chains) == 1
+        assert chains[0].first_claude_prompt == "fix the failing test in auth_test.py"
+
+    def test_truncated_to_max_length(self):
+        """Long prompt is truncated to FIRST_PROMPT_MAX_LENGTH."""
+        from ambient.detect.velocity import FIRST_PROMPT_MAX_LENGTH
+        long_prompt = "x" * 500
+        session = _session(ts_start=10000, session_id="s1")
+        session.claude_prompts = [long_prompt]
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=5000),
+            session,
+            _cmd("pytest", exit_code=0, ts_start=320000, duration_ms=5000),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert len(chains[0].first_claude_prompt) == FIRST_PROMPT_MAX_LENGTH
+
+    def test_only_first_session_prompt_captured(self):
+        """When chain has multiple claude sessions, only the first session's first prompt is stored."""
+        s1 = _session(ts_start=10000, duration_ms=60_000, session_id="s1")
+        s1.claude_prompts = ["first session first prompt"]
+        s2 = _session(ts_start=80000, duration_ms=60_000, session_id="s2")
+        s2.claude_prompts = ["second session first prompt"]
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=5000),
+            s1,
+            s2,
+            _cmd("pytest", exit_code=0, ts_start=150000, duration_ms=5000),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert chains[0].first_claude_prompt == "first session first prompt"
+
+    def test_empty_prompts_list_no_crash(self):
+        """Claude session with empty claude_prompts yields empty string, not None."""
+        session = _session(ts_start=10000, session_id="s1")
+        session.claude_prompts = []
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=5000),
+            session,
+            _cmd("pytest", exit_code=0, ts_start=320000, duration_ms=5000),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert chains[0].first_claude_prompt == ""
+
+    def test_no_claude_session_empty_prompt(self):
+        """Chain that never hits a claude_session has empty first_claude_prompt."""
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=5000),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert len(chains) == 1
+        assert chains[0].first_claude_prompt == ""
+        assert chains[0].closure_reason == "end_of_window"
+
+
 class TestComputeVelocityMetrics:
     def test_basic_metrics(self):
         chains = [

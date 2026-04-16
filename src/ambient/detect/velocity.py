@@ -8,6 +8,9 @@ from ambient.config import Config
 from ambient.detect.correlator import BENIGN_NONZERO_COMMANDS, _base_command
 
 
+FIRST_PROMPT_MAX_LENGTH = 120
+
+
 @dataclass
 class ResolutionChain:
     initial_failure_ts: int
@@ -20,6 +23,7 @@ class ResolutionChain:
     project: str
     outcome: str  # worst session outcome in chain
     closure_reason: str  # "matched_success" | "idle_break" | "end_of_window"
+    first_claude_prompt: str = ""  # truncated first prompt of the first claude session in the chain
 
     @property
     def resolved(self) -> bool:
@@ -96,6 +100,7 @@ def detect_resolution_chains(
         chain_active_ms: int = 0
         chain_worst_outcome: str = "productive"
         chain_has_claude: bool = False
+        chain_first_prompt: str = ""
         last_event_end: int = 0
 
         for event in proj_events:
@@ -115,6 +120,7 @@ def detect_resolution_chains(
                         project=project,
                         outcome=chain_worst_outcome,
                         closure_reason="idle_break",
+                        first_claude_prompt=chain_first_prompt,
                     ))
                     chain_start_ts = None
 
@@ -128,11 +134,15 @@ def detect_resolution_chains(
                     chain_active_ms = event.duration_ms
                     chain_worst_outcome = "productive"
                     chain_has_claude = False
+                    chain_first_prompt = ""
                     last_event_end = event.ts_end
                 continue
 
             # Chain is open — process event
             if event.type == "claude_session":
+                # Capture the first prompt of the first claude session in the chain
+                if not chain_has_claude and event.claude_prompts:
+                    chain_first_prompt = event.claude_prompts[0][:FIRST_PROMPT_MAX_LENGTH]
                 chain_has_claude = True
                 sid = event.claude_session_id or ""
                 chain_session_ids.append(sid)
@@ -162,6 +172,7 @@ def detect_resolution_chains(
                         project=project,
                         outcome=chain_worst_outcome,
                         closure_reason="matched_success",
+                        first_claude_prompt=chain_first_prompt,
                     ))
                     chain_start_ts = None
 
@@ -178,6 +189,7 @@ def detect_resolution_chains(
                 project=project,
                 outcome=chain_worst_outcome,
                 closure_reason="end_of_window",
+                first_claude_prompt=chain_first_prompt,
             ))
 
     return chains
