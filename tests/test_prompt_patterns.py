@@ -14,10 +14,12 @@ def _make_claude_event(
     prompts: list[str],
     session_id: str = "sess-1",
     project: str | None = "/home/user/myproject",
+    ts_start: int = 1000,
+    ts_end: int | None = None,
 ) -> Event:
     return Event(
-        ts_start=1000,
-        ts_end=2000,
+        ts_start=ts_start,
+        ts_end=ts_end if ts_end is not None else ts_start + 1000,
         duration_ms=1000,
         command="claude",
         exit_code=0,
@@ -195,11 +197,11 @@ def test_ngram_within_single_session(config):
     )
 
 
-# --- N-grams are NOT created across sessions (no false adjacency) ---
+# --- Within-session n-grams never emit cross-session adjacency ---
 
 
-def test_no_cross_session_ngrams(config):
-    # Each session has only one prompt, so no N-grams should form
+def test_no_within_session_ngrams_across_sessions(config):
+    """Within-session scope must not contain n-grams spanning multiple sessions."""
     events = [
         _make_claude_event(["run tests"], session_id="s1"),
         _make_claude_event(["fix errors"], session_id="s2"),
@@ -210,9 +212,10 @@ def test_no_cross_session_ngrams(config):
     ]
     result = detect_prompt_patterns(events, config)
 
-    ngram_patterns = [p for p in result.patterns if " -> " in p.normalized_prompt]
-    # No "run tests -> fix errors" should exist since they're in separate sessions
-    assert not any("run tests -> fix errors" in p.normalized_prompt for p in ngram_patterns)
+    within = [p for p in result.patterns if p.scope == "within_session"]
+    assert not any(
+        "run tests -> fix errors" in p.normalized_prompt for p in within
+    )
 
 
 # --- Projects tracked ---
@@ -275,3 +278,130 @@ def test_events_with_none_prompts(config):
 
     assert result.total_prompts == 0
     assert result.patterns == []
+
+
+# --- Cross-session n-grams ---
+
+
+class TestCrossSessionNgrams:
+    def test_cross_session_ngram_within_time_window(self, config):
+        """Same prompt sequence repeated across N sessions within 24h → cross-session pattern emitted."""
+        events = []
+        for i in range(4):
+            # Two adjacent sessions 1h apart, each with one prompt
+            events.append(_make_claude_event(
+                ["plan the feature"],
+                session_id=f"plan-{i}",
+                ts_start=1_000_000 + i * 2 * 3_600_000,  # 2h apart
+            ))
+            events.append(_make_claude_event(
+                ["implement the feature"],
+                session_id=f"impl-{i}",
+                ts_start=1_000_000 + i * 2 * 3_600_000 + 3_600_000,
+            ))
+        result = detect_prompt_patterns(events, config)
+        cross = [p for p in result.patterns if p.scope == "cross_session"]
+        assert any(
+            p.normalized_prompt == "plan the feature -> implement the feature" and p.count >= 3
+            for p in cross
+        )
+
+    def test_max_gap_breaks_cross_session_ngram(self):
+        """Sessions >24h apart do not produce cross-session n-grams."""
+        config = Config(
+            prompt_pattern_min_frequency=2,
+            prompt_pattern_cross_session_max_gap_ms=3_600_000,  # 1h
+        )
+        # Two sessions with 2h gap > 1h max → sentinel breaks the ngram
+        events = [
+            _make_claude_event(["a prompt"], session_id="s1", ts_start=1_000_000, ts_end=1_010_000),
+            _make_claude_event(["b prompt"], session_id="s2",
+                               ts_start=1_010_000 + 2 * 3_600_000,
+                               ts_end=1_020_000 + 2 * 3_600_000),
+            _make_claude_event(["a prompt"], session_id="s3", ts_start=50_000_000, ts_end=50_010_000),
+            _make_claude_event(["b prompt"], session_id="s4",
+                               ts_start=50_010_000 + 2 * 3_600_000,
+                               ts_end=50_020_000 + 2 * 3_600_000),
+        ]
+        result = detect_prompt_patterns(events, config)
+        cross = [p for p in result.patterns if p.scope == "cross_session"]
+        assert not any(
+            "a prompt -> b prompt" in p.normalized_prompt for p in cross
+        )
+
+    def test_single_session_repetition_not_counted_as_cross(self, config):
+        """When an n-gram is entirely within one session, it does not appear in cross-session scope."""
+        prompts = ["step a", "step b"] * 3
+        events = [_make_claude_event(prompts, session_id="s1", ts_start=1_000_000)]
+        result = detect_prompt_patterns(events, config)
+        cross = [p for p in result.patterns if p.scope == "cross_session"]
+        assert not any(
+            "step a -> step b" in p.normalized_prompt for p in cross
+        )
+        # But within-session pattern must be present
+        within = [p for p in result.patterns if p.scope == "within_session"]
+        assert any(
+            p.normalized_prompt == "step a -> step b" and p.count >= 3
+            for p in within
+        )
+
+    def test_cross_session_requires_project(self, config):
+        """Sessions without a project are excluded from cross-session pass."""
+        events = [
+            _make_claude_event(["plan x"], session_id=f"s{i}", project=None,
+                               ts_start=1_000_000 + i * 3_600_000)
+            for i in range(3)
+        ] + [
+            _make_claude_event(["do x"], session_id=f"d{i}", project=None,
+                               ts_start=1_000_000 + i * 3_600_000 + 1_800_000)
+            for i in range(3)
+        ]
+        result = detect_prompt_patterns(events, config)
+        cross = [p for p in result.patterns if p.scope == "cross_session"]
+        assert cross == []
+
+    def test_cross_session_scoped_per_project(self, config):
+        """Cross-session n-grams do not bridge across projects."""
+        events = []
+        # Project A: plan -> implement repeated
+        for i in range(3):
+            events.append(_make_claude_event(
+                ["plan"], session_id=f"a-plan-{i}", project="proj-a",
+                ts_start=1_000_000 + i * 7_200_000,
+            ))
+            events.append(_make_claude_event(
+                ["implement"], session_id=f"a-impl-{i}", project="proj-a",
+                ts_start=1_000_000 + i * 7_200_000 + 3_600_000,
+            ))
+        # Project B: interleaved but different project — should not link with A
+        events.append(_make_claude_event(
+            ["implement"], session_id="b-impl-1", project="proj-b",
+            ts_start=1_000_000 + 1_800_000,
+        ))
+
+        result = detect_prompt_patterns(events, config)
+        cross = [p for p in result.patterns if p.scope == "cross_session"]
+        # The "plan -> implement" pattern should be attributed only to proj-a
+        plan_impl = [p for p in cross if p.normalized_prompt == "plan -> implement"]
+        assert plan_impl
+        assert plan_impl[0].projects == ["proj-a"]
+
+    def test_within_and_cross_coexist_on_same_gram(self, config):
+        """A sequence that repeats both within and across sessions emits both scopes."""
+        # Session 1 has "plan it -> ship it" 3 times within itself
+        s1 = _make_claude_event(["plan it", "ship it"] * 3, session_id="s1", ts_start=1_000_000)
+        # Subsequent sessions contribute cross-session occurrences
+        s2 = _make_claude_event(["plan it"], session_id="s2", ts_start=2_000_000)
+        s3 = _make_claude_event(["ship it"], session_id="s3", ts_start=3_000_000)
+        s4 = _make_claude_event(["plan it"], session_id="s4", ts_start=4_000_000)
+        s5 = _make_claude_event(["ship it"], session_id="s5", ts_start=5_000_000)
+        s6 = _make_claude_event(["plan it"], session_id="s6", ts_start=6_000_000)
+        s7 = _make_claude_event(["ship it"], session_id="s7", ts_start=7_000_000)
+        result = detect_prompt_patterns([s1, s2, s3, s4, s5, s6, s7], config)
+
+        within = [p for p in result.patterns
+                  if p.scope == "within_session" and p.normalized_prompt == "plan it -> ship it"]
+        cross = [p for p in result.patterns
+                 if p.scope == "cross_session" and p.normalized_prompt == "plan it -> ship it"]
+        assert within, "expected within-session plan it -> ship it pattern"
+        assert cross, "expected cross-session plan it -> ship it pattern"

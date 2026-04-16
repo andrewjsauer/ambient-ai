@@ -36,6 +36,8 @@ class Config:
     # Prompt pattern detector
     prompt_pattern_min_frequency: int = 3
     prompt_pattern_max_length: int = 4
+    # Max wall-clock gap between adjacent sessions for cross-session n-gram linking.
+    prompt_pattern_cross_session_max_gap_ms: int = 86_400_000  # 24 hours
 
     # Coaching / thrash detection
     thrash_score_threshold: float = 0.5
