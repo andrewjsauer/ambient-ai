@@ -7,10 +7,13 @@ from ambient.capture.reader import Event
 from ambient.config import Config
 from ambient.detect.coaching import CoachingFindings, SessionOutcome, StuckPattern, StuckPatternFindings
 from ambient.detect.velocity import ResolutionChain, VelocityMetrics
+from ambient.detect.prompt_patterns import PromptPattern, PromptPatternFindings
 from ambient.present.insights import (
     CoachingData,
+    PeriodComparison,
     aggregate_coaching_data,
     build_insights_prompt,
+    compute_period_comparison,
     format_terminal_summary,
     generate_insights_report,
 )
@@ -227,5 +230,120 @@ class TestAggregateCoachingData:
             "ambient.present.insights.detect_prompt_patterns",
             side_effect=RuntimeError("boom"),
         ):
-            data = aggregate_coaching_data(config, window_days=7)
+            data = aggregate_coaching_data(config, window_days=7, compare=False)
         assert data.prompt_patterns.patterns == []
+
+
+def _make_coaching_data(
+    resolved_count=10,
+    avg_ms=120_000,
+    stuck_sessions=5,
+    avg_thrash=0.4,
+    top_patterns=(),
+    date_range="2026-04-01 to 2026-04-07",
+):
+    velocity = VelocityMetrics(
+        avg_ms=avg_ms,
+        median_ms=avg_ms,
+        p90_ms=avg_ms,
+        total_chains=resolved_count,
+        resolved_count=resolved_count,
+    )
+    stuck = StuckPatternFindings(patterns=[], total_stuck_sessions=stuck_sessions)
+    findings = CoachingFindings(
+        outcomes=[],
+        count_by_classification={},
+        avg_thrash_score=avg_thrash,
+    )
+    prompt_patterns = PromptPatternFindings(
+        patterns=[
+            PromptPattern(
+                normalized_prompt=norm,
+                raw_examples=[norm],
+                count=count,
+                projects=["p"],
+                scope="within_session",
+            )
+            for norm, count in top_patterns
+        ],
+        total_prompts=sum(c for _, c in top_patterns),
+    )
+    return CoachingData(
+        coaching_findings=findings,
+        stuck_patterns=stuck,
+        velocity_metrics=velocity,
+        chains=[],
+        window_days=7,
+        date_range=date_range,
+        prompt_patterns=prompt_patterns,
+    )
+
+
+class TestComputePeriodComparison:
+    def test_happy_path_velocity_delta(self):
+        current = _make_coaching_data(resolved_count=10, avg_ms=120_000, stuck_sessions=5)
+        prior = _make_coaching_data(resolved_count=10, avg_ms=180_000, stuck_sessions=8,
+                                    date_range="2026-03-25 to 2026-03-31")
+        cmp = compute_period_comparison(current, prior, Config())
+        assert cmp.insufficient_data_reason is None
+        # Current faster than prior → negative delta
+        assert cmp.velocity_delta_ms == -60_000
+        assert cmp.stuck_delta == -3
+
+    def test_insufficient_current_chains(self):
+        current = _make_coaching_data(resolved_count=3, avg_ms=120_000, stuck_sessions=5)
+        prior = _make_coaching_data(resolved_count=10, avg_ms=180_000, stuck_sessions=8)
+        cmp = compute_period_comparison(current, prior, Config())
+        assert cmp.insufficient_data_reason is not None
+        assert "resolved chains" in cmp.insufficient_data_reason
+        assert cmp.velocity_delta_ms is None
+
+    def test_insufficient_prior_stuck(self):
+        current = _make_coaching_data(resolved_count=10, avg_ms=120_000, stuck_sessions=5)
+        prior = _make_coaching_data(resolved_count=10, avg_ms=180_000, stuck_sessions=1)
+        cmp = compute_period_comparison(current, prior, Config())
+        assert cmp.insufficient_data_reason is not None
+        assert "stuck sessions" in cmp.insufficient_data_reason
+
+    def test_pattern_churn_new_and_dropped(self):
+        current = _make_coaching_data(
+            resolved_count=10, avg_ms=120_000, stuck_sessions=5,
+            top_patterns=[("commit this", 6), ("fix the test", 4)],
+        )
+        prior = _make_coaching_data(
+            resolved_count=10, avg_ms=180_000, stuck_sessions=5,
+            top_patterns=[("plan the feature", 5), ("commit this", 4)],
+            date_range="2026-03-25 to 2026-03-31",
+        )
+        cmp = compute_period_comparison(current, prior, Config())
+        assert "fix the test" in cmp.new_patterns
+        assert "plan the feature" in cmp.dropped_patterns
+        assert "commit this" not in cmp.new_patterns
+
+    def test_thrash_delta_skipped_when_either_is_none(self):
+        current = _make_coaching_data(resolved_count=10, avg_thrash=None, stuck_sessions=5)
+        prior = _make_coaching_data(resolved_count=10, avg_thrash=0.5, stuck_sessions=5)
+        cmp = compute_period_comparison(current, prior, Config())
+        assert cmp.thrash_delta is None
+
+    def test_prior_date_range_always_set(self):
+        current = _make_coaching_data(resolved_count=3, stuck_sessions=5)
+        prior = _make_coaching_data(resolved_count=3, stuck_sessions=5,
+                                    date_range="2026-03-25 to 2026-03-31")
+        cmp = compute_period_comparison(current, prior, Config())
+        assert cmp.prior_date_range == "2026-03-25 to 2026-03-31"
+
+
+class TestAggregateCompareFlag:
+    def test_compare_false_skips_prior_window_read(self, tmp_path):
+        config = _config(base_dir=tmp_path)
+        data = aggregate_coaching_data(config, window_days=7, compare=False)
+        assert data.comparison is None
+
+    def test_compare_true_runs_prior_aggregate(self, tmp_path):
+        """When compare=True, comparison is populated (insufficient reason is fine)."""
+        config = _config(base_dir=tmp_path)
+        data = aggregate_coaching_data(config, window_days=7, compare=True)
+        assert data.comparison is not None
+        # Empty window → both sides fail the gate
+        assert data.comparison.insufficient_data_reason is not None

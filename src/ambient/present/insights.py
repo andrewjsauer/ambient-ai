@@ -49,6 +49,24 @@ Be direct and specific. Cite numbers from the data. Focus on what the developer 
 
 
 @dataclass
+class PeriodComparison:
+    """Week-over-week deltas between current and prior windows.
+
+    All deltas are `current - prior`: negative velocity_delta_ms means faster;
+    negative stuck_delta means fewer stuck episodes. `insufficient_data_reason`
+    is set when the gates are not met; in that case the deltas are None.
+    """
+
+    velocity_delta_ms: int | None = None
+    stuck_delta: int | None = None
+    thrash_delta: float | None = None
+    new_patterns: list[str] = field(default_factory=list)  # top normalized prompts current∖prior
+    dropped_patterns: list[str] = field(default_factory=list)  # top normalized prompts prior∖current
+    insufficient_data_reason: str | None = None
+    prior_date_range: str = ""
+
+
+@dataclass
 class CoachingData:
     """Top-level insights aggregate.
 
@@ -70,6 +88,7 @@ class CoachingData:
         default_factory=lambda: CompressionFindings(sequences=[], compression_ratio=1.0)
     )
     correlations: CorrelationFindings = field(default_factory=CorrelationFindings)
+    comparison: PeriodComparison | None = None
 
 
 def _safe_run(fn, *args, default, label, **kwargs):
@@ -84,24 +103,27 @@ def _safe_run(fn, *args, default, label, **kwargs):
         return default
 
 
-def aggregate_coaching_data(config: Config, window_days: int = 7) -> CoachingData:
-    end = datetime.now()
-    start = end - timedelta(days=window_days)
-    date_range = f"{start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}"
+_PATTERN_CHURN_TOP_N = 5
+_COMPARISON_MIN_STUCK = 3
 
+
+def _aggregate_window(
+    config: Config, start: datetime, end: datetime, window_days: int
+) -> CoachingData:
+    """Run every detector over a date window and assemble a CoachingData.
+
+    Does not populate `.comparison`; the caller fills that in if applicable.
+    """
+    date_range = f"{start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}"
     events = read_events(config, start=start, end=end)
 
     findings = classify_sessions(events, config)
     stuck = group_stuck_patterns(findings.outcomes, events, config)
 
-    # Build outcome map for velocity tracker
     outcome_map = {o.session_id: o.classification for o in findings.outcomes}
     chains = detect_resolution_chains(events, config, session_outcomes=outcome_map)
     velocity = compute_velocity_metrics(chains, min_chains=config.velocity_min_chains)
 
-    # Extended detectors — each wrapped so an unexpected failure can't crash
-    # the insights pipeline. All three are pure over `events` so ordering
-    # and reuse are safe.
     prompt_patterns = _safe_run(
         detect_prompt_patterns, events, config,
         default=PromptPatternFindings(patterns=[], total_prompts=0),
@@ -129,6 +151,81 @@ def aggregate_coaching_data(config: Config, window_days: int = 7) -> CoachingDat
         compression=compression,
         correlations=correlations,
     )
+
+
+def compute_period_comparison(
+    current: CoachingData, prior: CoachingData, config: Config
+) -> PeriodComparison:
+    """Diff two windows. Gated by velocity_min_chains + stuck floor on both sides."""
+    cur_velocity = current.velocity_metrics
+    pri_velocity = prior.velocity_metrics
+    cur_stuck = current.stuck_patterns.total_stuck_sessions
+    pri_stuck = prior.stuck_patterns.total_stuck_sessions
+
+    if (
+        cur_velocity.resolved_count < config.velocity_min_chains
+        or pri_velocity.resolved_count < config.velocity_min_chains
+    ):
+        return PeriodComparison(
+            insufficient_data_reason=(
+                f"Each window needs at least {config.velocity_min_chains} resolved chains "
+                f"(current: {cur_velocity.resolved_count}, prior: {pri_velocity.resolved_count})."
+            ),
+            prior_date_range=prior.date_range,
+        )
+    if cur_stuck < _COMPARISON_MIN_STUCK or pri_stuck < _COMPARISON_MIN_STUCK:
+        return PeriodComparison(
+            insufficient_data_reason=(
+                f"Each window needs at least {_COMPARISON_MIN_STUCK} stuck sessions "
+                f"(current: {cur_stuck}, prior: {pri_stuck})."
+            ),
+            prior_date_range=prior.date_range,
+        )
+
+    # Top-N normalized prompts for pattern churn (within_session scope only;
+    # cross-session already captures multi-session repetition)
+    def _top_prompts(data: CoachingData) -> set[str]:
+        ranked = sorted(
+            (p for p in data.prompt_patterns.patterns if p.scope == "within_session"),
+            key=lambda p: p.count,
+            reverse=True,
+        )
+        return {p.normalized_prompt for p in ranked[:_PATTERN_CHURN_TOP_N]}
+
+    current_top = _top_prompts(current)
+    prior_top = _top_prompts(prior)
+
+    thrash_delta: float | None = None
+    cur_thrash = current.coaching_findings.avg_thrash_score
+    pri_thrash = prior.coaching_findings.avg_thrash_score
+    if cur_thrash is not None and pri_thrash is not None:
+        thrash_delta = cur_thrash - pri_thrash
+
+    return PeriodComparison(
+        velocity_delta_ms=cur_velocity.avg_ms - pri_velocity.avg_ms,
+        stuck_delta=cur_stuck - pri_stuck,
+        thrash_delta=thrash_delta,
+        new_patterns=sorted(current_top - prior_top)[:_PATTERN_CHURN_TOP_N],
+        dropped_patterns=sorted(prior_top - current_top)[:_PATTERN_CHURN_TOP_N],
+        prior_date_range=prior.date_range,
+    )
+
+
+def aggregate_coaching_data(
+    config: Config, window_days: int = 7, compare: bool = True
+) -> CoachingData:
+    end = datetime.now()
+    start = end - timedelta(days=window_days)
+    current = _aggregate_window(config, start, end, window_days)
+
+    if compare:
+        # Prior window: equal length, ending where current window starts.
+        prior_end = start
+        prior_start = prior_end - timedelta(days=window_days)
+        prior = _aggregate_window(config, prior_start, prior_end, window_days)
+        current.comparison = compute_period_comparison(current, prior, config)
+
+    return current
 
 
 def build_insights_prompt(data: CoachingData) -> str:
