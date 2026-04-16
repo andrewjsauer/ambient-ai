@@ -39,9 +39,29 @@ class StuckPattern:
 
 
 @dataclass
+class ToolStuckPattern:
+    tool_name: str
+    episode_count: int  # stuck sessions where this tool appeared
+    projects: list[str]
+    avg_thrash_score: float | None
+    total_duration_ms: int
+
+
+@dataclass
+class FileClusterStuckPattern:
+    path_fragment: str
+    episode_count: int
+    projects: list[str]
+    failing_tools: list[str]
+    total_duration_ms: int
+
+
+@dataclass
 class StuckPatternFindings:
     patterns: list[StuckPattern] = field(default_factory=list)
     total_stuck_sessions: int = 0
+    tool_level_patterns: list[ToolStuckPattern] = field(default_factory=list)
+    file_cluster_patterns: list[FileClusterStuckPattern] = field(default_factory=list)
 
 
 def _compute_thrash_score(error_count: int, prompt_count: int, min_prompts: int) -> float | None:
@@ -64,6 +84,40 @@ def _extract_tool_names(tools: list[dict] | None) -> list[str]:
     if not tools:
         return []
     return list({t.get("name", "unknown") for t in tools})
+
+
+def _dominant_path_prefix(files: list[str]) -> str:
+    """Per-session dominant path prefix for file-cluster grouping.
+
+    Strategy:
+    - Longest common directory prefix of the session's files if >=2 chars.
+    - Otherwise the basename of the first file (so single-file sessions still group).
+    - Empty string if there are no files.
+    """
+    if not files:
+        return ""
+    if len(files) == 1:
+        name = files[0].rsplit("/", 1)[-1]
+        return name if name else files[0]
+
+    # Longest common char prefix, then trim to the last directory boundary
+    prefix = files[0]
+    for f in files[1:]:
+        while not f.startswith(prefix):
+            prefix = prefix[:-1]
+            if not prefix:
+                break
+        if not prefix:
+            break
+
+    if "/" in prefix:
+        prefix = prefix.rsplit("/", 1)[0] + "/"
+    if len(prefix) >= 2:
+        return prefix
+
+    # Fall back to basename of first file
+    first = files[0]
+    return first.rsplit("/", 1)[-1] or first
 
 
 def classify_session_outcome(event: Event, config: Config) -> SessionOutcome:
@@ -187,7 +241,73 @@ def group_stuck_patterns(
     # Sort by episode_count descending
     patterns.sort(key=lambda p: p.episode_count, reverse=True)
 
+    # --- Tool-level grouping: one pattern per failing tool across stuck sessions ---
+    tool_level = _group_by_tool(stuck, config)
+
+    # --- File-cluster grouping: one pattern per dominant-prefix bucket ---
+    file_clusters = _group_by_file_cluster(stuck, config)
+
     return StuckPatternFindings(
         patterns=patterns,
         total_stuck_sessions=len(stuck),
+        tool_level_patterns=tool_level,
+        file_cluster_patterns=file_clusters,
     )
+
+
+def _group_by_tool(
+    stuck: list[SessionOutcome], config: Config
+) -> list[ToolStuckPattern]:
+    by_tool: dict[str, list[SessionOutcome]] = {}
+    for o in stuck:
+        for tool_name in _extract_tool_names(o.tools):
+            by_tool.setdefault(tool_name, []).append(o)
+
+    results: list[ToolStuckPattern] = []
+    for tool_name, tool_outcomes in by_tool.items():
+        if len(tool_outcomes) < 2:
+            continue  # single-session tool patterns are redundant with project-level
+        thrash_scores = [o.thrash_score for o in tool_outcomes if o.thrash_score is not None]
+        if len(thrash_scores) >= config.thrash_aggregate_min_n:
+            avg_thrash = sum(thrash_scores) / len(thrash_scores)
+        else:
+            avg_thrash = None
+        results.append(ToolStuckPattern(
+            tool_name=tool_name,
+            episode_count=len(tool_outcomes),
+            projects=sorted({o.project for o in tool_outcomes}),
+            avg_thrash_score=avg_thrash,
+            total_duration_ms=sum(o.duration_ms for o in tool_outcomes),
+        ))
+
+    results.sort(key=lambda p: p.episode_count, reverse=True)
+    return results
+
+
+def _group_by_file_cluster(
+    stuck: list[SessionOutcome], config: Config
+) -> list[FileClusterStuckPattern]:
+    by_prefix: dict[str, list[SessionOutcome]] = {}
+    for o in stuck:
+        prefix = _dominant_path_prefix(o.files or [])
+        if not prefix:
+            continue  # skip sessions with no file signal
+        by_prefix.setdefault(prefix, []).append(o)
+
+    results: list[FileClusterStuckPattern] = []
+    for prefix, cluster_outcomes in by_prefix.items():
+        if len(cluster_outcomes) < 2:
+            continue  # singletons already covered by project grouping
+        tools: set[str] = set()
+        for o in cluster_outcomes:
+            tools.update(_extract_tool_names(o.tools))
+        results.append(FileClusterStuckPattern(
+            path_fragment=prefix,
+            episode_count=len(cluster_outcomes),
+            projects=sorted({o.project for o in cluster_outcomes}),
+            failing_tools=sorted(tools),
+            total_duration_ms=sum(o.duration_ms for o in cluster_outcomes),
+        ))
+
+    results.sort(key=lambda p: p.episode_count, reverse=True)
+    return results

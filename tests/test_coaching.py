@@ -301,3 +301,130 @@ class TestGroupStuckPatterns:
         assert len(stuck.patterns) == 1
         assert stuck.patterns[0].avg_thrash_score is not None
         assert isinstance(stuck.patterns[0].avg_thrash_score, float)
+
+
+class TestToolLevelStuckPatterns:
+    def test_tool_grouping_across_projects(self):
+        """Edit failing across 2 projects → one tool_level_pattern with episode_count=4."""
+        events = []
+        for proj, i in [("auth", 0), ("auth", 1), ("frontend", 0), ("frontend", 1)]:
+            events.append(_make_session(
+                prompt_count=6, error_count=5, project=proj,
+                tools=[{"name": "Edit", "files": ["x.py"]}, {"name": "Bash", "files": []}],
+                files=["x.py"], session_id=f"{proj}-s{i}",
+            ))
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        edit_patterns = [t for t in stuck.tool_level_patterns if t.tool_name == "Edit"]
+        assert len(edit_patterns) == 1
+        assert edit_patterns[0].episode_count == 4
+        assert set(edit_patterns[0].projects) == {"auth", "frontend"}
+
+    def test_single_session_tool_excluded(self):
+        """Tool appearing in only 1 stuck session is skipped (covered by project pattern)."""
+        events = [
+            _make_session(prompt_count=6, error_count=5, project="auth",
+                          tools=[{"name": "Write", "files": []}, {"name": "Bash", "files": []}] * 2,
+                          session_id="s1"),
+        ]
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        assert stuck.tool_level_patterns == []
+
+    def test_tool_low_sample_avg_thrash_none(self):
+        """Tool pattern with <thrash_aggregate_min_n scoring sessions → avg_thrash_score is None."""
+        events = [
+            _make_session(prompt_count=6, error_count=5, project="auth",
+                          tools=[{"name": "Bash", "files": []}] * 2,
+                          session_id=f"s{i}")
+            for i in range(3)  # 3 < default aggregate min 5
+        ]
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        bash_patterns = [t for t in stuck.tool_level_patterns if t.tool_name == "Bash"]
+        assert bash_patterns[0].avg_thrash_score is None
+
+    def test_tool_sorted_by_episode_count(self):
+        """Tool patterns sorted descending by episode_count."""
+        events = []
+        # 3 sessions using Edit + Bash, 2 sessions using only Read
+        for i in range(3):
+            events.append(_make_session(
+                prompt_count=6, error_count=5, project="p1",
+                tools=[{"name": "Edit", "files": []}, {"name": "Bash", "files": []}] * 2,
+                session_id=f"eb-{i}",
+            ))
+        for i in range(2):
+            events.append(_make_session(
+                prompt_count=6, error_count=5, project="p2",
+                tools=[{"name": "Read", "files": []}, {"name": "Edit", "files": []}] * 2,
+                session_id=f"r-{i}",
+            ))
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        tool_counts = [(t.tool_name, t.episode_count) for t in stuck.tool_level_patterns]
+        # Edit appears in all 5 (3 eb + 2 r), Bash in 3, Read in 2
+        counts_by_name = dict(tool_counts)
+        assert counts_by_name["Edit"] == 5
+        assert counts_by_name["Bash"] == 3
+        # Should be sorted desc
+        assert [c for _, c in tool_counts] == sorted([c for _, c in tool_counts], reverse=True)
+
+
+class TestFileClusterStuckPatterns:
+    def test_shared_directory_prefix_detected(self):
+        """3 sessions touching agents/*.md → one cluster with path_fragment='agents/'."""
+        events = []
+        for i, fname in enumerate(["pm.md", "reviewer.md", "planner.md"]):
+            events.append(_make_session(
+                prompt_count=6, error_count=5, project="scheduler",
+                tools=[{"name": "Edit", "files": []}, {"name": "Bash", "files": []}] * 2,
+                files=[f"agents/{fname}", f"agents/helpers/shared.md"],
+                session_id=f"s{i}",
+            ))
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        agents_clusters = [c for c in stuck.file_cluster_patterns if c.path_fragment == "agents/"]
+        assert len(agents_clusters) == 1
+        assert agents_clusters[0].episode_count == 3
+        assert "scheduler" in agents_clusters[0].projects
+
+    def test_singleton_cluster_excluded(self):
+        """Single session with unique file prefix is excluded from file_cluster_patterns."""
+        events = [
+            _make_session(prompt_count=6, error_count=5, project="p",
+                          tools=[{"name": "Edit", "files": []}] * 2,
+                          files=["lonely/file.py"], session_id="s1"),
+        ]
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        assert stuck.file_cluster_patterns == []
+
+    def test_no_files_skipped_not_unknown(self):
+        """Stuck session with empty files list does not produce a file_cluster_pattern."""
+        events = [
+            _make_session(prompt_count=6, error_count=5, project="p",
+                          tools=[{"name": "Edit", "files": []}] * 2,
+                          files=None, session_id=f"s{i}")
+            for i in range(3)
+        ]
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        # No file-cluster pattern (no file signal)
+        assert stuck.file_cluster_patterns == []
+        assert not any(c.path_fragment == "unknown" for c in stuck.file_cluster_patterns)
+
+    def test_project_level_patterns_unchanged(self):
+        """Existing patterns field is not mutated by the new groupings."""
+        events = [
+            _make_session(prompt_count=6, error_count=5, project="auth",
+                          tools=[{"name": "Bash", "files": []}] * 4,
+                          files=["src/auth.py"], session_id=f"s{i}")
+            for i in range(3)
+        ]
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        # Project-level still works the same as before
+        assert len(stuck.patterns) == 1
+        assert stuck.patterns[0].project == "auth"
+        assert stuck.patterns[0].episode_count == 3
