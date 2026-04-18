@@ -18,6 +18,7 @@ def _make_session(
     project="test-project",
     session_id="sess-1",
     event_type="claude_session",
+    prompts=None,
 ):
     """Build a claude_session Event for testing."""
     return Event(
@@ -31,7 +32,7 @@ def _make_session(
         gap_ms=None,
         type=event_type,
         claude_session_id=session_id,
-        claude_prompts=["test"] * prompt_count,
+        claude_prompts=prompts if prompts is not None else ["test"] * prompt_count,
         claude_tools=tools,
         claude_files=files,
         claude_project=project,
@@ -428,3 +429,136 @@ class TestFileClusterStuckPatterns:
         assert len(stuck.patterns) == 1
         assert stuck.patterns[0].project == "auth"
         assert stuck.patterns[0].episode_count == 3
+
+
+class TestOpeningPromptsAndVagueFraming:
+    """Stuck patterns carry opening prompts of their stuck sessions plus a
+    vague-framing diagnostic. Hedged under low sample."""
+
+    def test_opening_prompt_captured(self):
+        event = _make_session(
+            prompt_count=10, error_count=0,
+            tools=[{"name": "Write", "files": []}] * 3,
+            prompts=["implement the login refactor"] + ["test"] * 9,
+        )
+        outcome = classify_session_outcome(event, _config())
+        assert outcome.opening_prompt == "implement the login refactor"
+
+    def test_opening_prompt_truncated(self):
+        from ambient.detect.coaching import OPENING_PROMPT_MAX_LENGTH
+        event = _make_session(
+            prompt_count=10,
+            prompts=["x" * 500] + ["test"] * 9,
+        )
+        outcome = classify_session_outcome(event, _config())
+        assert len(outcome.opening_prompt) == OPENING_PROMPT_MAX_LENGTH
+
+    def test_stuck_pattern_carries_opening_prompts(self):
+        """Stuck pattern's opening_prompts list matches its stuck sessions."""
+        events = []
+        session_prompts = [
+            "fix this auth bug",
+            "debug the login issue",
+            "why is the token expired",
+        ]
+        for i, p in enumerate(session_prompts):
+            events.append(_make_session(
+                prompt_count=6, error_count=5, project="auth",
+                tools=[{"name": "Bash", "files": []}] * 4,
+                session_id=f"s{i}",
+                prompts=[p] + ["follow up"] * 5,
+            ))
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        assert stuck.patterns[0].opening_prompts == session_prompts
+
+    def test_vague_framing_fraction_emitted_above_floor(self):
+        """>=thrash_aggregate_min_n stuck sessions → fraction emits."""
+        events = []
+        # 5 sessions, 3 vague, 2 specific
+        vague = ["fix this bug", "debug it", "figure out why it fails"]
+        specific = ["rename User to Account", "add a logout endpoint"]
+        for i, p in enumerate(vague + specific):
+            events.append(_make_session(
+                prompt_count=6, error_count=5, project="auth",
+                tools=[{"name": "Bash", "files": []}] * 4,
+                session_id=f"s{i}",
+                prompts=[p] + ["fu"] * 5,
+            ))
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        pattern = stuck.patterns[0]
+        assert pattern.vague_framing_fraction is not None
+        assert abs(pattern.vague_framing_fraction - 3 / 5) < 0.001
+
+    def test_vague_framing_fraction_none_under_low_sample(self):
+        """<thrash_aggregate_min_n stuck sessions → fraction is None."""
+        events = [
+            _make_session(
+                prompt_count=6, error_count=5, project="auth",
+                tools=[{"name": "Bash", "files": []}] * 4,
+                session_id=f"s{i}",
+                prompts=["figure out why it crashes"] + ["fu"] * 5,
+            )
+            for i in range(3)
+        ]
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        # Only 3 stuck < 5 min_n → None
+        assert stuck.patterns[0].vague_framing_fraction is None
+        # But opening_prompts are still populated regardless
+        assert len(stuck.patterns[0].opening_prompts) == 3
+
+    def test_vague_framing_fraction_zero_when_all_specific(self):
+        """If every prompt is specific, fraction is 0.0, not None."""
+        events = []
+        specific = [f"rename variable_{i} to new_name_{i}" for i in range(5)]
+        for i, p in enumerate(specific):
+            events.append(_make_session(
+                prompt_count=6, error_count=5, project="auth",
+                tools=[{"name": "Bash", "files": []}] * 4,
+                session_id=f"s{i}",
+                prompts=[p] + ["fu"] * 5,
+            ))
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        assert stuck.patterns[0].vague_framing_fraction == 0.0
+
+    def test_tool_and_cluster_patterns_also_carry_prompts(self):
+        """ToolStuckPattern and FileClusterStuckPattern carry opening_prompts too."""
+        events = [
+            _make_session(
+                prompt_count=6, error_count=5, project=proj,
+                tools=[{"name": "Edit", "files": []}, {"name": "Bash", "files": []}],
+                files=["src/auth.py"],
+                session_id=f"{proj}-s{i}",
+                prompts=[f"fix the {proj} bug {i}"] + ["fu"] * 5,
+            )
+            for proj in ("auth", "frontend")
+            for i in range(2)
+        ]
+        findings = classify_sessions(events, _config())
+        stuck = group_stuck_patterns(findings.outcomes, events, _config())
+        edit_patterns = [t for t in stuck.tool_level_patterns if t.tool_name == "Edit"]
+        assert edit_patterns
+        assert len(edit_patterns[0].opening_prompts) == 4
+        # File cluster: all sessions touch src/auth.py
+        clusters = stuck.file_cluster_patterns
+        assert clusters
+        assert len(clusters[0].opening_prompts) == 4
+
+    def test_custom_vague_framing_patterns(self):
+        """Config-driven patterns: adding 'TODO:' matches it."""
+        config = _config(coaching_vague_framing_patterns=[r"^TODO:"])
+        events = [
+            _make_session(
+                prompt_count=6, error_count=5, project="auth",
+                tools=[{"name": "Bash", "files": []}] * 4,
+                session_id=f"s{i}",
+                prompts=["TODO: something" if i < 3 else "specific task"] + ["fu"] * 5,
+            )
+            for i in range(5)
+        ]
+        findings = classify_sessions(events, config)
+        stuck = group_stuck_patterns(findings.outcomes, events, config)
+        assert abs(stuck.patterns[0].vague_framing_fraction - 3 / 5) < 0.001

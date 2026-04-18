@@ -1,9 +1,12 @@
 """Coaching detectors: session outcome classification, thrash scoring, stuck pattern grouping."""
 
+import re
 from dataclasses import dataclass, field
 
 from ambient.capture.reader import Event
 from ambient.config import Config
+
+OPENING_PROMPT_MAX_LENGTH = 140
 
 
 @dataclass
@@ -17,6 +20,7 @@ class SessionOutcome:
     error_count: int
     tools: list[dict]
     files: list[str]
+    opening_prompt: str = ""  # first prompt of the session, truncated
 
 
 @dataclass
@@ -36,6 +40,8 @@ class StuckPattern:
     avg_thrash_score: float | None
     total_duration_ms: int
     session_ids: list[str]
+    opening_prompts: list[str] = field(default_factory=list)
+    vague_framing_fraction: float | None = None
 
 
 @dataclass
@@ -45,6 +51,8 @@ class ToolStuckPattern:
     projects: list[str]
     avg_thrash_score: float | None
     total_duration_ms: int
+    opening_prompts: list[str] = field(default_factory=list)
+    vague_framing_fraction: float | None = None
 
 
 @dataclass
@@ -54,6 +62,8 @@ class FileClusterStuckPattern:
     projects: list[str]
     failing_tools: list[str]
     total_duration_ms: int
+    opening_prompts: list[str] = field(default_factory=list)
+    vague_framing_fraction: float | None = None
 
 
 @dataclass
@@ -84,6 +94,25 @@ def _extract_tool_names(tools: list[dict] | None) -> list[str]:
     if not tools:
         return []
     return list({t.get("name", "unknown") for t in tools})
+
+
+def _vague_framing_fraction(
+    opening_prompts: list[str], config: Config
+) -> float | None:
+    """Fraction of opening prompts matching any vague-framing regex.
+
+    Returns None when the sample is too small to be meaningful (reuses
+    thrash_aggregate_min_n as the confidence floor).
+    """
+    non_empty = [p for p in opening_prompts if p]
+    if len(non_empty) < config.thrash_aggregate_min_n:
+        return None
+    patterns = [re.compile(p, re.IGNORECASE) for p in config.coaching_vague_framing_patterns]
+    matches = sum(
+        1 for prompt in non_empty
+        if any(pat.search(prompt) for pat in patterns)
+    )
+    return matches / len(non_empty)
 
 
 def _dominant_path_prefix(files: list[str]) -> str:
@@ -129,6 +158,9 @@ def classify_session_outcome(event: Event, config: Config) -> SessionOutcome:
     duration_ms = event.duration_ms
     session_id = event.claude_session_id or ""
 
+    prompts = event.claude_prompts or []
+    opening_prompt = prompts[0][:OPENING_PROMPT_MAX_LENGTH] if prompts else ""
+
     thrash_score = _compute_thrash_score(error_count, prompt_count, config.thrash_min_prompts)
 
     # Strict precedence ordering
@@ -156,6 +188,7 @@ def classify_session_outcome(event: Event, config: Config) -> SessionOutcome:
         error_count=error_count,
         tools=tools,
         files=files,
+        opening_prompt=opening_prompt,
     )
 
 
@@ -208,6 +241,7 @@ def group_stuck_patterns(
         all_files: list[str] = []
         all_tool_names: list[str] = []
         session_ids: list[str] = []
+        opening_prompts: list[str] = []
         total_duration = 0
         thrash_scores: list[float] = []
 
@@ -216,6 +250,8 @@ def group_stuck_patterns(
             all_tool_names.extend(_extract_tool_names(o.tools))
             session_ids.append(o.session_id)
             total_duration += o.duration_ms
+            if o.opening_prompt:
+                opening_prompts.append(o.opening_prompt)
             if o.thrash_score is not None:
                 thrash_scores.append(o.thrash_score)
 
@@ -236,6 +272,8 @@ def group_stuck_patterns(
             avg_thrash_score=avg_thrash,
             total_duration_ms=total_duration,
             session_ids=session_ids,
+            opening_prompts=opening_prompts,
+            vague_framing_fraction=_vague_framing_fraction(opening_prompts, config),
         ))
 
     # Sort by episode_count descending
@@ -272,12 +310,15 @@ def _group_by_tool(
             avg_thrash = sum(thrash_scores) / len(thrash_scores)
         else:
             avg_thrash = None
+        prompts = [o.opening_prompt for o in tool_outcomes if o.opening_prompt]
         results.append(ToolStuckPattern(
             tool_name=tool_name,
             episode_count=len(tool_outcomes),
             projects=sorted({o.project for o in tool_outcomes}),
             avg_thrash_score=avg_thrash,
             total_duration_ms=sum(o.duration_ms for o in tool_outcomes),
+            opening_prompts=prompts,
+            vague_framing_fraction=_vague_framing_fraction(prompts, config),
         ))
 
     results.sort(key=lambda p: p.episode_count, reverse=True)
@@ -301,12 +342,15 @@ def _group_by_file_cluster(
         tools: set[str] = set()
         for o in cluster_outcomes:
             tools.update(_extract_tool_names(o.tools))
+        prompts = [o.opening_prompt for o in cluster_outcomes if o.opening_prompt]
         results.append(FileClusterStuckPattern(
             path_fragment=prefix,
             episode_count=len(cluster_outcomes),
             projects=sorted({o.project for o in cluster_outcomes}),
             failing_tools=sorted(tools),
             total_duration_ms=sum(o.duration_ms for o in cluster_outcomes),
+            opening_prompts=prompts,
+            vague_framing_fraction=_vague_framing_fraction(prompts, config),
         ))
 
     results.sort(key=lambda p: p.episode_count, reverse=True)
