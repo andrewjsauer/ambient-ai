@@ -52,6 +52,9 @@ _DEFAULT_CAPS = {
     "stuck_projects": 5,
     "stuck_tools": 5,
     "stuck_clusters": 5,
+    "stuck_opening_prompts": 3,  # per-pattern cap for verbatim prompt quotes
+    "verification_gaps": 8,
+    "abandonment_examples": 3,  # per new closure_reason
     "pending_recs": 10,
 }
 
@@ -408,6 +411,19 @@ def _section_session_outcomes(data: CoachingData) -> list[str]:
     return lines
 
 
+def _format_framing(frac: float | None) -> str:
+    if frac is None:
+        return ""
+    return f" | vague framing: {frac * 100:.0f}%"
+
+
+def _format_opening_prompts(prompts: list[str], cap: int) -> list[str]:
+    """Render up to `cap` verbatim opening prompts as indented quoted lines."""
+    if not prompts:
+        return []
+    return [f"    opening: \"{_truncate(p, 120)}\"" for p in prompts[:cap]]
+
+
 def _section_stuck_by_project(data: CoachingData, caps: dict) -> list[str]:
     sp = data.stuck_patterns
     lines = [f"\nSTUCK PATTERNS — BY PROJECT ({sp.total_stuck_sessions} stuck sessions):"]
@@ -424,9 +440,11 @@ def _section_stuck_by_project(data: CoachingData, caps: dict) -> list[str]:
             f"  {p.project}: {p.episode_count} episodes, {thrash_str}, "
             f"tools: {', '.join(p.failing_tools)}, "
             f"total time: {p.total_duration_ms / 60000:.1f}min"
+            f"{_format_framing(p.vague_framing_fraction)}"
         )
         if p.file_cluster and p.file_cluster != ["unknown"]:
             lines.append(f"    files: {', '.join(p.file_cluster[:5])}")
+        lines.extend(_format_opening_prompts(p.opening_prompts, caps["stuck_opening_prompts"]))
     return lines
 
 
@@ -446,7 +464,9 @@ def _section_stuck_by_tool(data: CoachingData, caps: dict) -> list[str]:
             f"  {t.tool_name}: {t.episode_count} stuck sessions across "
             f"{len(t.projects)} project(s) [{', '.join(t.projects)}], "
             f"{thrash_str}, total time: {t.total_duration_ms / 60000:.1f}min"
+            f"{_format_framing(t.vague_framing_fraction)}"
         )
+        lines.extend(_format_opening_prompts(t.opening_prompts, caps["stuck_opening_prompts"]))
     return lines
 
 
@@ -461,7 +481,72 @@ def _section_stuck_by_cluster(data: CoachingData, caps: dict) -> list[str]:
             f"  {c.path_fragment}: {c.episode_count} stuck sessions "
             f"[{', '.join(c.projects)}], tools: {', '.join(c.failing_tools)}, "
             f"total time: {c.total_duration_ms / 60000:.1f}min"
+            f"{_format_framing(c.vague_framing_fraction)}"
         )
+        lines.extend(_format_opening_prompts(c.opening_prompts, caps["stuck_opening_prompts"]))
+    return lines
+
+
+def _section_verification_gaps(data: CoachingData, caps: dict) -> list[str]:
+    vg = data.verification_gaps
+    lines = ["\nVERIFICATION GAPS (fixes not followed by a verifying test run):"]
+    if vg.total_fix_sessions == 0:
+        lines.append("  No fix sessions (Edit/Write) in this window.")
+        return lines
+    if vg.low_sample:
+        lines.append(
+            f"  {len(vg.gaps)} gap(s) of {vg.total_fix_sessions} fix sessions "
+            "(low sample — no rate published)"
+        )
+    else:
+        pct = (vg.gap_rate or 0) * 100
+        lines.append(
+            f"  {len(vg.gaps)} of {vg.total_fix_sessions} fix sessions shipped "
+            f"without a verifying test run ({pct:.0f}%)"
+        )
+    for g in vg.gaps[: caps["verification_gaps"]]:
+        files_preview = ", ".join(g.edited_files[:3]) if g.edited_files else "(no files)"
+        lines.append(
+            f"    [{g.project}] session {g.session_id[:12]}… edited: {files_preview}"
+        )
+    return lines
+
+
+def _section_abandonment_reasons(data: CoachingData, caps: dict) -> list[str]:
+    v = data.velocity_metrics
+    by_reason = v.by_reason or {}
+    lines = ["\nABANDONMENT BY REASON:"]
+    if not by_reason:
+        lines.append("  No chains in this window.")
+        return lines
+    # Order: specific idle codes first, then end_of_window, then matched_success
+    order = (
+        "matched_success",
+        "interrupt_mid_thought",
+        "context_rot",
+        "given_up",
+        "end_of_window",
+    )
+    for key in order:
+        count = by_reason.get(key, 0)
+        if count:
+            lines.append(f"  {key}: {count}")
+    # Example chains per new idle reason
+    for key in ("interrupt_mid_thought", "context_rot", "given_up"):
+        examples = [
+            c for c in data.chains if c.closure_reason == key
+        ][: caps["abandonment_examples"]]
+        if examples:
+            lines.append(f"  Examples — {key}:")
+            for c in examples:
+                prompt = (
+                    f" prompt: \"{_truncate(c.first_claude_prompt, 80)}\""
+                    if c.first_claude_prompt else ""
+                )
+                lines.append(
+                    f"    [{c.project}] \"{_truncate(c.initial_command, 60)}\" "
+                    f"({c.active_time_ms / 60000:.1f} min active){prompt}"
+                )
     return lines
 
 
@@ -540,7 +625,9 @@ def build_insights_prompt(data: CoachingData, caps: dict | None = None) -> str:
     sections += _section_stuck_by_project(data, caps)
     sections += _section_stuck_by_tool(data, caps)
     sections += _section_stuck_by_cluster(data, caps)
+    sections += _section_verification_gaps(data, caps)
     sections += _section_velocity(data)
+    sections += _section_abandonment_reasons(data, caps)
     sections += _section_period_comparison(data)
     sections += _section_pending_recommendations(data, caps)
     return "\n".join(sections)
@@ -598,6 +685,26 @@ def format_terminal_summary(data: CoachingData) -> str:
         lines.append(f"Top command sequence: x{top_seq.count} {seq_text}")
 
     lines.append(f"Pending recs:         {len(data.pending_recommendations)}")
+
+    # Verification gaps — hedge when sample too low
+    vg = data.verification_gaps
+    if vg.total_fix_sessions > 0:
+        if vg.low_sample:
+            lines.append(
+                f"Verification gaps:    {len(vg.gaps)}/{vg.total_fix_sessions} "
+                "fixes (low sample)"
+            )
+        else:
+            pct = (vg.gap_rate or 0) * 100
+            lines.append(
+                f"Verification gaps:    {len(vg.gaps)}/{vg.total_fix_sessions} fixes "
+                f"({pct:.0f}%)"
+            )
+
+    # Top trigger prompt — the opening prompt of the longest stuck episode, if any
+    if sp.patterns and sp.patterns[0].opening_prompts:
+        trigger = sp.patterns[0].opening_prompts[0]
+        lines.append(f"Top trigger prompt:   \"{_truncate(trigger, 60)}\"")
 
     if sp.patterns:
         top = sp.patterns[0]

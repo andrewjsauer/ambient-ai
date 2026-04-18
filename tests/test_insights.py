@@ -531,6 +531,133 @@ class TestRichBuildInsightsPrompt:
         assert "RECURRING COMMAND SEQUENCES" in prompt
 
 
+class TestResearchBackedSections:
+    """Unit 6 wire-up: verification gaps + abandonment reasons + opening prompts
+    all surface in the prompt built from a populated fixture."""
+
+    def _rich_data_with_new_signals(self):
+        from ambient.detect.verification import VerificationGap, VerificationGapFindings
+        data = _fully_populated_data()
+        # Stuff the stuck pattern with opening prompts + vague framing
+        data.stuck_patterns.patterns[0].opening_prompts = [
+            "figure out why the auth test is broken",
+            "fix this login flow",
+        ]
+        data.stuck_patterns.patterns[0].vague_framing_fraction = 0.67
+        # Add a tool-level pattern with prompts
+        data.stuck_patterns.tool_level_patterns[0].opening_prompts = [
+            "debug this edit issue",
+        ]
+        # Add a file cluster with prompts
+        data.stuck_patterns.file_cluster_patterns[0].opening_prompts = [
+            "why is src/auth broken",
+        ]
+        # Verification gaps
+        data.verification_gaps = VerificationGapFindings(
+            gaps=[
+                VerificationGap(
+                    session_id="sess-gap-1", project="auth",
+                    session_end_ts=123456, session_cwd="/tmp/auth",
+                    edited_files=["src/auth.py"],
+                ),
+            ],
+            total_fix_sessions=12,
+            gap_rate=1 / 12,
+            low_sample=False,
+        )
+        # Give velocity by_reason counts the new codes
+        data.velocity_metrics.by_reason = {
+            "matched_success": 1,
+            "interrupt_mid_thought": 2,
+            "context_rot": 3,
+            "given_up": 4,
+            "end_of_window": 1,
+        }
+        # And populate chains with one example per new reason
+        data.chains = [
+            ResolutionChain(
+                initial_failure_ts=0, initial_command="pytest",
+                claude_session_ids=["s1"], resolution_ts=100,
+                resolution_command="", active_time_ms=240_000, wall_time_ms=200,
+                project="auth", outcome="productive",
+                closure_reason="interrupt_mid_thought",
+                first_claude_prompt="fix the failing auth test",
+            ),
+            ResolutionChain(
+                initial_failure_ts=0, initial_command="npm test",
+                claude_session_ids=["s2"], resolution_ts=100,
+                resolution_command="", active_time_ms=360_000, wall_time_ms=200,
+                project="frontend", outcome="friction",
+                closure_reason="context_rot",
+                first_claude_prompt="understand why login breaks",
+            ),
+            ResolutionChain(
+                initial_failure_ts=0, initial_command="cargo build",
+                claude_session_ids=["s3"], resolution_ts=100,
+                resolution_command="", active_time_ms=480_000, wall_time_ms=200,
+                project="rustproj", outcome="productive",
+                closure_reason="given_up",
+                first_claude_prompt="refactor the service trait",
+            ),
+        ]
+        return data
+
+    def test_verification_gaps_section_renders(self):
+        data = self._rich_data_with_new_signals()
+        prompt = build_insights_prompt(data)
+        assert "VERIFICATION GAPS" in prompt
+        assert "12 fix sessions" in prompt
+        assert "src/auth.py" in prompt
+
+    def test_verification_gaps_empty_renders_placeholder(self):
+        data = _fully_populated_data()  # default empty VerificationGapFindings
+        prompt = build_insights_prompt(data)
+        assert "VERIFICATION GAPS" in prompt
+        assert "No fix sessions" in prompt
+
+    def test_verification_gaps_low_sample(self):
+        from ambient.detect.verification import VerificationGap, VerificationGapFindings
+        data = _fully_populated_data()
+        data.verification_gaps = VerificationGapFindings(
+            gaps=[VerificationGap(
+                session_id="s1", project="x", session_end_ts=0,
+                session_cwd="/tmp", edited_files=["a.py"])],
+            total_fix_sessions=3,
+            gap_rate=None,
+            low_sample=True,
+        )
+        prompt = build_insights_prompt(data)
+        assert "low sample" in prompt
+        # No percentage should be published
+        assert "%" not in prompt or prompt.count("%") == 0 or \
+            "%)" not in [l for l in prompt.split("\n") if "low sample" in l][0]
+
+    def test_abandonment_section_has_new_reasons(self):
+        data = self._rich_data_with_new_signals()
+        prompt = build_insights_prompt(data)
+        assert "ABANDONMENT BY REASON" in prompt
+        assert "interrupt_mid_thought" in prompt
+        assert "context_rot" in prompt
+        assert "given_up" in prompt
+        # Example chain first_claude_prompt appears verbatim
+        assert "fix the failing auth test" in prompt
+        assert "understand why login breaks" in prompt
+
+    def test_stuck_pattern_includes_opening_prompts(self):
+        data = self._rich_data_with_new_signals()
+        prompt = build_insights_prompt(data)
+        assert "figure out why the auth test is broken" in prompt
+        assert "fix this login flow" in prompt
+        # Vague framing percentage rendered
+        assert "vague framing: 67%" in prompt
+
+    def test_tool_and_cluster_patterns_also_carry_prompts_in_prompt(self):
+        data = self._rich_data_with_new_signals()
+        prompt = build_insights_prompt(data)
+        assert "debug this edit issue" in prompt
+        assert "why is src/auth broken" in prompt
+
+
 class TestRichTerminalSummary:
     def test_includes_top_prompt_and_sequence(self):
         summary = format_terminal_summary(_fully_populated_data())
@@ -553,6 +680,30 @@ class TestRichTerminalSummary:
         )
         summary = format_terminal_summary(data)
         assert "vs prior" in summary
+
+    def test_verification_gap_line_in_terminal(self):
+        from ambient.detect.verification import VerificationGap, VerificationGapFindings
+        data = _fully_populated_data()
+        data.verification_gaps = VerificationGapFindings(
+            gaps=[VerificationGap(
+                session_id="s1", project="p", session_end_ts=0,
+                session_cwd="/tmp", edited_files=["a.py"])],
+            total_fix_sessions=12,
+            gap_rate=1 / 12,
+            low_sample=False,
+        )
+        summary = format_terminal_summary(data)
+        assert "Verification gaps:" in summary
+        assert "12 fixes" in summary
+
+    def test_top_trigger_prompt_in_terminal(self):
+        data = _fully_populated_data()
+        data.stuck_patterns.patterns[0].opening_prompts = [
+            "figure out why auth is broken",
+        ]
+        summary = format_terminal_summary(data)
+        assert "Top trigger prompt:" in summary
+        assert "figure out why auth is broken" in summary
 
 
 class TestPromptBudgetTrimming:
