@@ -498,6 +498,27 @@ class TestRichBuildInsightsPrompt:
         # Must forbid generic phrasing
         assert "insufficient" in INSIGHTS_SYSTEM.lower()
 
+    def test_system_prompt_has_surprise_section(self):
+        """Surprise of the Week directive is present with explicit escape hatch."""
+        from ambient.present.insights import INSIGHTS_SYSTEM
+        assert "Surprise of the Week" in INSIGHTS_SYSTEM
+        # Escape-hatch phrase must appear verbatim so Sonnet can echo it
+        assert "No surprise identified this week" in INSIGHTS_SYSTEM
+
+    def test_system_prompt_has_anti_pattern_section(self):
+        """Anti-Pattern Callout directive is present with escape hatch and 'exactly ONE'."""
+        from ambient.present.insights import INSIGHTS_SYSTEM
+        assert "Anti-Pattern Callout" in INSIGHTS_SYSTEM
+        assert "exactly ONE" in INSIGHTS_SYSTEM or "exactly one" in INSIGHTS_SYSTEM
+        assert "No single anti-pattern stands out this week" in INSIGHTS_SYSTEM
+
+    def test_system_prompt_vocabulary_glossary(self):
+        """Glossary names five industry-standard terms for consistent naming."""
+        from ambient.present.insights import INSIGHTS_SYSTEM
+        for term in ("prompt debt", "verification gap", "context rot",
+                     "cognitive debt", "vague framing"):
+            assert term in INSIGHTS_SYSTEM.lower()
+
     def test_empty_sections_elide_gracefully(self):
         """Sections with no data render a terse placeholder, not a crash."""
         data = _fully_populated_data()
