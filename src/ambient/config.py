@@ -53,6 +53,43 @@ class Config:
     # "active debugging time" metric even though they sit inside the chain.
     velocity_max_command_contribution_ms: int = 600_000  # 10 minutes
     velocity_max_session_contribution_ms: int = 3_600_000  # 60 minutes
+    # Abandonment-reason classification (Unit 2): how many Read/Grep/ToolSearch
+    # calls in a session with zero Edit/Write constitute "context rot".
+    velocity_context_rot_min_tool_calls: int = 5
+
+    # Verification-gap detector (Unit 1)
+    verification_gap_window_ms: int = 300_000  # 5 minutes
+    verification_min_fix_sessions: int = 10  # floor for emitting gap_rate
+    verification_test_command_patterns: list[str] = field(default_factory=lambda: [
+        "pytest",
+        "npm test",
+        "npm run test",
+        "yarn test",
+        "pnpm test",
+        "bun test",
+        "cargo test",
+        "go test",
+        "make test",
+        "rake test",
+        "mix test",
+        "jest",
+        "vitest",
+        "deno test",
+        "rspec",
+    ])
+
+    # Stuck-loop trigger-prompt diagnostic (Unit 3)
+    coaching_vague_framing_patterns: list[str] = field(default_factory=lambda: [
+        r"\bfigure out\b",
+        r"\bfix (this|that|it)\b",
+        r"\bdebug (this|that|it)\b",
+        r"\bwhat.?s wrong\b",
+        r"\bwhy (is|isn.?t)\b",
+        r"\bunderstand why\b",
+        r"\bhelp me\b",
+        r"\bsomething.?s broken\b",
+        r"\bnot working\b",
+    ])
 
     # API
     haiku_model: str = "claude-haiku-4-5"

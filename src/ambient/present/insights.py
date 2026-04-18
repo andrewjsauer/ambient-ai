@@ -31,6 +31,10 @@ from ambient.detect.velocity import (
     compute_velocity_metrics,
     detect_resolution_chains,
 )
+from ambient.detect.verification import (
+    VerificationGapFindings,
+    detect_verification_gaps,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -114,6 +118,9 @@ class CoachingData:
     correlations: CorrelationFindings = field(default_factory=CorrelationFindings)
     comparison: PeriodComparison | None = None
     pending_recommendations: list[dict] = field(default_factory=list)
+    verification_gaps: VerificationGapFindings = field(
+        default_factory=VerificationGapFindings
+    )
 
 
 def _safe_run(fn, *args, default, label, **kwargs):
@@ -164,6 +171,11 @@ def _aggregate_window(
         default=CorrelationFindings(),
         label="correlator",
     )
+    verification_gaps = _safe_run(
+        detect_verification_gaps, events, config,
+        default=VerificationGapFindings(),
+        label="verification_gaps",
+    )
 
     return CoachingData(
         coaching_findings=findings,
@@ -175,6 +187,7 @@ def _aggregate_window(
         prompt_patterns=prompt_patterns,
         compression=compression,
         correlations=correlations,
+        verification_gaps=verification_gaps,
     )
 
 
