@@ -71,6 +71,45 @@ def _capped_contribution(event: Event, config: Config) -> int:
     return min(event.duration_ms, config.velocity_max_command_contribution_ms)
 
 
+# Tools that indicate the agent was exploring/searching rather than writing code.
+# A session dominated by these with zero Edit/Write is "context rot": the agent
+# hunted for context it couldn't find.
+_CONTEXT_ROT_TOOLS = frozenset({"Read", "Grep", "Glob", "ToolSearch"})
+_FIX_WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+
+def _classify_idle_closure(last_session: Event | None, config: Config) -> str:
+    """Pick the most specific idle-break reason code for a closing chain.
+
+    Priority: interrupt_mid_thought > context_rot > given_up.
+    Applies heuristics to the last claude_session in the chain. Shell-only
+    chains (no claude_session) default to given_up — the user started a
+    failure-response sequence and abandoned it.
+    """
+    if last_session is None:
+        return "given_up"
+
+    tools = last_session.claude_tools or []
+    if not tools:
+        return "given_up"
+
+    tool_names = [t.get("name") for t in tools]
+    # interrupt_mid_thought: session ended with Claude waiting on the user
+    if tool_names and tool_names[-1] == "AskUserQuestion":
+        return "interrupt_mid_thought"
+
+    has_write = any(name in _FIX_WRITE_TOOLS for name in tool_names)
+    if has_write:
+        return "given_up"
+
+    # No writes — check for context rot: many read/search calls, no edits
+    search_count = sum(1 for name in tool_names if name in _CONTEXT_ROT_TOOLS)
+    if search_count >= config.velocity_context_rot_min_tool_calls:
+        return "context_rot"
+
+    return "given_up"
+
+
 # Outcome severity for "worst wins" logic
 _OUTCOME_SEVERITY = {"productive": 0, "quick": 1, "abandoned": 2, "friction": 3}
 
@@ -113,6 +152,7 @@ def detect_resolution_chains(
         chain_worst_outcome: str = "productive"
         chain_has_claude: bool = False
         chain_first_prompt: str = ""
+        chain_last_session: Event | None = None  # for idle-closure classification
         last_event_end: int = 0
 
         for event in proj_events:
@@ -120,7 +160,8 @@ def detect_resolution_chains(
             if chain_start_ts is not None and last_event_end > 0:
                 gap = event.ts_start - last_event_end
                 if gap > idle_break:
-                    # Break the chain — unresolved
+                    # Break the chain — classify the reason
+                    reason = _classify_idle_closure(chain_last_session, config)
                     chains.append(ResolutionChain(
                         initial_failure_ts=chain_start_ts,
                         initial_command=chain_command,
@@ -131,7 +172,7 @@ def detect_resolution_chains(
                         wall_time_ms=last_event_end - chain_start_ts,
                         project=project,
                         outcome=chain_worst_outcome,
-                        closure_reason="idle_break",
+                        closure_reason=reason,
                         first_claude_prompt=chain_first_prompt,
                     ))
                     chain_start_ts = None
@@ -147,6 +188,7 @@ def detect_resolution_chains(
                     chain_worst_outcome = "productive"
                     chain_has_claude = False
                     chain_first_prompt = ""
+                    chain_last_session = None
                     last_event_end = event.ts_end
                 continue
 
@@ -156,6 +198,7 @@ def detect_resolution_chains(
                 if not chain_has_claude and event.claude_prompts:
                     chain_first_prompt = event.claude_prompts[0][:FIRST_PROMPT_MAX_LENGTH]
                 chain_has_claude = True
+                chain_last_session = event  # keep updating — want the LAST one in the chain
                 sid = event.claude_session_id or ""
                 chain_session_ids.append(sid)
                 chain_active_ms += _capped_contribution(event, config)

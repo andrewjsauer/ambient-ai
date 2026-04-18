@@ -302,6 +302,113 @@ class TestActiveTimeCap:
         assert chains[0].active_time_ms == 1_000 + 2_000 + 1_000
 
 
+class TestAbandonmentReasonTaxonomy:
+    """closure_reason carries specific idle-break semantics: interrupt_mid_thought,
+    context_rot, or given_up — in addition to matched_success and end_of_window."""
+
+    def _base_events(self, session):
+        """Shared helper: failed command → session → idle gap."""
+        return [
+            _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=5_000),
+            session,
+            _cmd("pytest", exit_code=1,
+                 ts_start=session.ts_end + 1_200_000,  # 20 min gap
+                 duration_ms=5_000),
+        ]
+
+    def test_interrupt_mid_thought(self):
+        """Last tool is AskUserQuestion → interrupt_mid_thought."""
+        session = _session(ts_start=10_000, duration_ms=60_000, session_id="s1")
+        session.claude_tools = [
+            {"name": "Read", "files": ["a.py"]},
+            {"name": "AskUserQuestion", "files": []},
+        ]
+        chains = detect_resolution_chains(self._base_events(session), _config())
+        interrupted = [c for c in chains if c.closure_reason == "interrupt_mid_thought"]
+        assert len(interrupted) == 1
+
+    def test_context_rot(self):
+        """>=5 Read/Grep/ToolSearch calls with 0 Edit/Write → context_rot."""
+        session = _session(ts_start=10_000, duration_ms=60_000, session_id="s1")
+        session.claude_tools = [
+            {"name": "Read", "files": []},
+            {"name": "Grep", "files": []},
+            {"name": "Glob", "files": []},
+            {"name": "Read", "files": []},
+            {"name": "ToolSearch", "files": []},
+        ]
+        chains = detect_resolution_chains(self._base_events(session), _config())
+        rotted = [c for c in chains if c.closure_reason == "context_rot"]
+        assert len(rotted) == 1
+
+    def test_given_up_with_writes(self):
+        """Session had at least one Edit/Write → given_up."""
+        session = _session(ts_start=10_000, duration_ms=60_000, session_id="s1")
+        session.claude_tools = [
+            {"name": "Read", "files": []},
+            {"name": "Edit", "files": ["x.py"]},
+        ]
+        chains = detect_resolution_chains(self._base_events(session), _config())
+        given_up = [c for c in chains if c.closure_reason == "given_up"]
+        assert len(given_up) == 1
+
+    def test_matched_success_still_wins(self):
+        """matched_success takes priority over all idle classifications."""
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1_000, duration_ms=5_000),
+            _session(ts_start=10_000, duration_ms=60_000, session_id="s1"),
+            _cmd("pytest", exit_code=0, ts_start=80_000, duration_ms=5_000),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert len(chains) == 1
+        assert chains[0].closure_reason == "matched_success"
+        assert chains[0].resolved is True
+
+    def test_end_of_window_unchanged(self):
+        """Chain still open at end of events → end_of_window, not classified."""
+        session = _session(ts_start=10_000, duration_ms=60_000, session_id="s1")
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1_000, duration_ms=5_000),
+            session,
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert chains[0].closure_reason == "end_of_window"
+
+    def test_shell_only_chain_given_up(self):
+        """Chain with no claude_session at all → defaults to given_up on idle_break."""
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1_000, duration_ms=5_000),
+            _cmd("ls", exit_code=0, ts_start=10_000, duration_ms=500,
+                 cwd="/home/user/auth"),
+            _cmd("pytest", exit_code=1, ts_start=1_300_000, duration_ms=5_000),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        idle_chains = [c for c in chains
+                       if c.closure_reason not in ("matched_success", "end_of_window")]
+        assert len(idle_chains) == 1
+        assert idle_chains[0].closure_reason == "given_up"
+
+    def test_context_rot_threshold_configurable(self):
+        """velocity_context_rot_min_tool_calls controls the threshold."""
+        config = _config(velocity_context_rot_min_tool_calls=2)
+        session = _session(ts_start=10_000, duration_ms=60_000, session_id="s1")
+        session.claude_tools = [
+            {"name": "Read", "files": []},
+            {"name": "Grep", "files": []},
+        ]
+        chains = detect_resolution_chains(self._base_events(session), config)
+        rotted = [c for c in chains if c.closure_reason == "context_rot"]
+        assert len(rotted) == 1
+
+    def test_resolved_property_back_compat(self):
+        """All new reason codes keep resolved=False (only matched_success is True)."""
+        session = _session(ts_start=10_000, duration_ms=60_000, session_id="s1")
+        session.claude_tools = [{"name": "AskUserQuestion", "files": []}]
+        chains = detect_resolution_chains(self._base_events(session), _config())
+        assert chains[0].closure_reason == "interrupt_mid_thought"
+        assert chains[0].resolved is False
+
+
 class TestComputeVelocityMetrics:
     def test_basic_metrics(self):
         chains = [
@@ -378,8 +485,8 @@ class TestClosureReason:
         assert chains[0].closure_reason == "matched_success"
         assert chains[0].resolved is True
 
-    def test_idle_break(self):
-        """Gap > velocity_idle_break_ms closes open chain with idle_break."""
+    def test_idle_break_given_up(self):
+        """Gap > velocity_idle_break_ms closes open chain; session had Edit so classified as given_up."""
         events = [
             _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=5000),
             _session(ts_start=10000, duration_ms=60_000, session_id="s1"),
@@ -388,9 +495,10 @@ class TestClosureReason:
         ]
         chains = detect_resolution_chains(events, _config())
         assert len(chains) >= 1
-        idle_chains = [c for c in chains if c.closure_reason == "idle_break"]
-        assert len(idle_chains) == 1
-        assert idle_chains[0].resolved is False
+        # Session had Edit tool (real work) so reason is given_up, not interrupt/rot
+        given_up = [c for c in chains if c.closure_reason == "given_up"]
+        assert len(given_up) == 1
+        assert given_up[0].resolved is False
 
     def test_end_of_window(self):
         """Open chain at end of events closes with end_of_window."""
