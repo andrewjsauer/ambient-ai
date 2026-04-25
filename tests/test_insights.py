@@ -107,10 +107,11 @@ class TestBuildInsightsPrompt:
         assert "No resolved chains" in prompt
 
     def test_no_stuck_patterns(self):
+        """v3 behavior: empty stuck-patterns section is omitted entirely."""
         data = _sample_data(stuck_sessions=0)
         data.stuck_patterns = StuckPatternFindings()
         prompt = build_insights_prompt(data)
-        assert "No stuck patterns detected" in prompt
+        assert "STUCK PATTERNS" not in prompt
 
 
 class TestFormatTerminalSummary:
@@ -187,6 +188,28 @@ class TestAggregateCoachingData:
         assert data.prompt_patterns.patterns == []
         assert data.compression.sequences == []
         assert data.correlations.patterns == []
+
+    def test_resets_capability_cache_each_run(self, tmp_path):
+        """aggregate_coaching_data must clear the per-run capability cache so
+        capability changes between runs (new package.json, removed Makefile)
+        are picked up. Without this, stale capabilities bleed across back-to-
+        back insights runs."""
+        from ambient.detect import project_capabilities as pc
+        from pathlib import Path
+
+        config = _config(base_dir=tmp_path)
+
+        # Pre-seed the cache with a value that detect_capabilities would not
+        # produce on its own; the first thing aggregate_coaching_data does is
+        # clear the cache, so this entry must not survive.
+        pc._capability_cache["/sentinel/path"] = pc.Capabilities(
+            has_tests=True, evidence={"has_tests": "sentinel"}
+        )
+        assert "/sentinel/path" in pc._capability_cache
+
+        aggregate_coaching_data(config, window_days=7, compare=False)
+
+        assert "/sentinel/path" not in pc._capability_cache
 
     def test_correlator_is_invoked_with_real_data(self, tmp_path):
         """Fail-then-Claude event pair → correlator emits a pattern."""
@@ -431,6 +454,12 @@ def _fully_populated_data():
         ],
         total_correlations=8,
     )
+    comparison = PeriodComparison(
+        velocity_delta_ms=-30_000,
+        stuck_delta=-1,
+        thrash_delta=-0.05,
+        prior_date_range="2026-04-03 to 2026-04-09",
+    )
     return CoachingData(
         coaching_findings=findings,
         stuck_patterns=stuck,
@@ -441,6 +470,7 @@ def _fully_populated_data():
         prompt_patterns=prompt_patterns,
         compression=compression,
         correlations=correlations,
+        comparison=comparison,
         pending_recommendations=[
             {"id": "skill-commit-this", "type": "skill", "title": "Commit this skill",
              "rationale": "repeated 7x"},
@@ -499,36 +529,71 @@ class TestRichBuildInsightsPrompt:
         assert "insufficient" in INSIGHTS_SYSTEM.lower()
 
     def test_system_prompt_has_surprise_section(self):
-        """Surprise of the Week directive is present with explicit escape hatch."""
+        """Surprise of the Week directive is present; v3 omits empty sections
+        entirely instead of using a verbatim escape-hatch phrase."""
         from ambient.present.insights import INSIGHTS_SYSTEM
         assert "Surprise of the Week" in INSIGHTS_SYSTEM
-        # Escape-hatch phrase must appear verbatim so Sonnet can echo it
-        assert "No surprise identified this week" in INSIGHTS_SYSTEM
+        # v3 instructs Sonnet to omit the section rather than echo a
+        # placeholder phrase. Confirm the omit instruction is present.
+        assert "omit this section" in INSIGHTS_SYSTEM.lower()
 
-    def test_system_prompt_has_anti_pattern_section(self):
-        """Anti-Pattern Callout directive is present with escape hatch and 'exactly ONE'."""
+    def test_system_prompt_drops_anti_pattern_callout(self):
+        """v3 removes the Anti-Pattern Callout in favor of Diagnostic Questions.
+        The 2026-04-25 critique showed the callout pathologized normal
+        continuation prompts ('go for it', 'yes lets fix these') based on
+        thin data."""
         from ambient.present.insights import INSIGHTS_SYSTEM
-        assert "Anti-Pattern Callout" in INSIGHTS_SYSTEM
-        assert "exactly ONE" in INSIGHTS_SYSTEM or "exactly one" in INSIGHTS_SYSTEM
-        assert "No single anti-pattern stands out this week" in INSIGHTS_SYSTEM
+        assert "Anti-Pattern Callout" not in INSIGHTS_SYSTEM
+
+    def test_system_prompt_has_diagnostic_questions(self):
+        """v3 ends the report with three Socratic questions instead of
+        prescribing recommendations. Forces the developer's own synthesis."""
+        from ambient.present.insights import INSIGHTS_SYSTEM
+        assert "Diagnostic Questions" in INSIGHTS_SYSTEM
+        # Must require exactly three, and forbid prescriptive directives
+        assert "exactly three" in INSIGHTS_SYSTEM
+        assert "Do not issue directives" in INSIGHTS_SYSTEM
+
+    def test_system_prompt_drops_developer_prompt_grading(self):
+        """v3 explicitly tells the model not to grade continuation prompts
+        like 'go for it' as risk signals — those are normal acceptance
+        responses, not anti-patterns."""
+        from ambient.present.insights import INSIGHTS_SYSTEM
+        assert "go for it" in INSIGHTS_SYSTEM
+        assert "agent's planning posture" in INSIGHTS_SYSTEM
+
+    def test_system_prompt_flags_100_percent_as_suspect(self):
+        """v3 instructs the model to treat 100% rates as detector-suspect
+        rather than confident findings — direct response to the false
+        100% verification gap in the v2 report."""
+        from ambient.present.insights import INSIGHTS_SYSTEM
+        assert "100%" in INSIGHTS_SYSTEM
+        assert "suspect" in INSIGHTS_SYSTEM.lower()
 
     def test_system_prompt_vocabulary_glossary(self):
-        """Glossary names five industry-standard terms for consistent naming."""
+        """Glossary names industry-standard terms for consistent naming.
+        v3 drops 'vague framing' from the user-facing glossary because that
+        framing pathologized normal continuation prompts; the vague-framing
+        detector remains internal as a stuck-pattern grouping signal."""
         from ambient.present.insights import INSIGHTS_SYSTEM
         for term in ("prompt debt", "verification gap", "context rot",
-                     "cognitive debt", "vague framing"):
+                     "cognitive debt"):
             assert term in INSIGHTS_SYSTEM.lower()
 
-    def test_empty_sections_elide_gracefully(self):
-        """Sections with no data render a terse placeholder, not a crash."""
+    def test_empty_sections_are_omitted_entirely(self):
+        """v3 behavior: sections with no input data are omitted from the
+        prompt entirely, not rendered with 'no data' filler. The narrative
+        layer is instructed to skip them rather than acknowledge them."""
         data = _fully_populated_data()
         data.prompt_patterns = PromptPatternFindings(patterns=[], total_prompts=0)
         data.compression = CompressionFindings(sequences=[], compression_ratio=1.0)
         data.correlations = CorrelationFindings()
         prompt = build_insights_prompt(data)
-        assert "RECURRING PROMPTS" in prompt
-        assert "None detected" in prompt
-        assert "RECURRING COMMAND SEQUENCES" in prompt
+        assert "RECURRING PROMPTS" not in prompt
+        assert "RECURRING COMMAND SEQUENCES" not in prompt
+        assert "SHELL ↔ CLAUDE CORRELATIONS" not in prompt
+        # The placeholder text from v2 should never appear
+        assert "None detected" not in prompt
 
 
 class TestResearchBackedSections:
@@ -552,18 +617,23 @@ class TestResearchBackedSections:
         data.stuck_patterns.file_cluster_patterns[0].opening_prompts = [
             "why is src/auth broken",
         ]
-        # Verification gaps
+        # Verification gaps — has_tests bucket dominates the rich fixture
         data.verification_gaps = VerificationGapFindings(
             gaps=[
                 VerificationGap(
                     session_id="sess-gap-1", project="auth",
                     session_end_ts=123456, session_cwd="/tmp/auth",
                     edited_files=["src/auth.py"],
+                    bucket="has_tests",
                 ),
             ],
             total_fix_sessions=12,
             gap_rate=1 / 12,
             low_sample=False,
+            total_fix_sessions_by_bucket={"has_tests": 12, "has_typecheck": 0, "neither": 0},
+            gaps_by_bucket={"has_tests": 1, "has_typecheck": 0, "neither": 0},
+            gap_rate_by_bucket={"has_tests": 1 / 12, "has_typecheck": None, "neither": None},
+            low_sample_by_bucket={"has_tests": False, "has_typecheck": True, "neither": True},
         )
         # Give velocity by_reason counts the new codes
         data.velocity_metrics.by_reason = {
@@ -606,14 +676,18 @@ class TestResearchBackedSections:
         data = self._rich_data_with_new_signals()
         prompt = build_insights_prompt(data)
         assert "VERIFICATION GAPS" in prompt
-        assert "12 fix sessions" in prompt
+        # Per-bucket headline includes the projects-with-tests count
+        assert "projects with tests" in prompt
+        assert "12 fix session(s)" in prompt
         assert "src/auth.py" in prompt
 
-    def test_verification_gaps_empty_renders_placeholder(self):
+    def test_verification_gaps_empty_omitted_in_v3(self):
+        """v3: when there are no fix sessions, the section is omitted from
+        the prompt entirely. v2 emitted a 'No fix sessions' placeholder."""
         data = _fully_populated_data()  # default empty VerificationGapFindings
         prompt = build_insights_prompt(data)
-        assert "VERIFICATION GAPS" in prompt
-        assert "No fix sessions" in prompt
+        assert "VERIFICATION GAPS" not in prompt
+        assert "No fix sessions" not in prompt
 
     def test_verification_gaps_low_sample(self):
         from ambient.detect.verification import VerificationGap, VerificationGapFindings
@@ -621,10 +695,14 @@ class TestResearchBackedSections:
         data.verification_gaps = VerificationGapFindings(
             gaps=[VerificationGap(
                 session_id="s1", project="x", session_end_ts=0,
-                session_cwd="/tmp", edited_files=["a.py"])],
+                session_cwd="/tmp", edited_files=["a.py"], bucket="has_tests")],
             total_fix_sessions=3,
             gap_rate=None,
             low_sample=True,
+            total_fix_sessions_by_bucket={"has_tests": 3, "has_typecheck": 0, "neither": 0},
+            gaps_by_bucket={"has_tests": 1, "has_typecheck": 0, "neither": 0},
+            gap_rate_by_bucket={"has_tests": None, "has_typecheck": None, "neither": None},
+            low_sample_by_bucket={"has_tests": True, "has_typecheck": True, "neither": True},
         )
         prompt = build_insights_prompt(data)
         assert "low sample" in prompt
@@ -648,8 +726,14 @@ class TestResearchBackedSections:
         prompt = build_insights_prompt(data)
         assert "figure out why the auth test is broken" in prompt
         assert "fix this login flow" in prompt
-        # Vague framing percentage rendered
-        assert "vague framing: 67%" in prompt
+
+    def test_vague_framing_label_not_emitted_into_prompt(self):
+        """v3 drops the 'vague framing: X%' label from the LLM prompt because
+        INSIGHTS_SYSTEM now tells the model not to grade developer prompts.
+        The detector field remains for internal stuck-pattern grouping."""
+        data = self._rich_data_with_new_signals()
+        prompt = build_insights_prompt(data)
+        assert "vague framing" not in prompt.lower()
 
     def test_tool_and_cluster_patterns_also_carry_prompts_in_prompt(self):
         data = self._rich_data_with_new_signals()
@@ -682,19 +766,67 @@ class TestRichTerminalSummary:
         assert "vs prior" in summary
 
     def test_verification_gap_line_in_terminal(self):
+        """v3 renders per-bucket. The 12 fix sessions all live in has_tests."""
         from ambient.detect.verification import VerificationGap, VerificationGapFindings
         data = _fully_populated_data()
         data.verification_gaps = VerificationGapFindings(
             gaps=[VerificationGap(
                 session_id="s1", project="p", session_end_ts=0,
-                session_cwd="/tmp", edited_files=["a.py"])],
+                session_cwd="/tmp", edited_files=["a.py"], bucket="has_tests")],
             total_fix_sessions=12,
             gap_rate=1 / 12,
             low_sample=False,
+            total_fix_sessions_by_bucket={"has_tests": 12, "has_typecheck": 0, "neither": 0},
+            gaps_by_bucket={"has_tests": 1, "has_typecheck": 0, "neither": 0},
+            gap_rate_by_bucket={"has_tests": 1 / 12, "has_typecheck": None, "neither": None},
+            low_sample_by_bucket={"has_tests": False, "has_typecheck": True, "neither": True},
         )
         summary = format_terminal_summary(data)
-        assert "Verification gaps:" in summary
+        assert "Verification gaps (tests)" in summary
         assert "12 fixes" in summary
+
+    def test_terminal_summary_neither_bucket_does_not_show_percentage(self):
+        """v3 fix for the v2 100% headline: an all-neither workload must not
+        produce a '10/10 fixes (100%)' line in the terminal summary."""
+        from ambient.detect.verification import VerificationGap, VerificationGapFindings
+        data = _fully_populated_data()
+        data.verification_gaps = VerificationGapFindings(
+            gaps=[VerificationGap(
+                session_id=f"s{i}", project="np", session_end_ts=0,
+                session_cwd="/tmp", edited_files=["a.py"], bucket="neither")
+                for i in range(10)],
+            total_fix_sessions=10,
+            gap_rate=1.0,  # legacy aggregate field; should not be displayed
+            low_sample=False,
+            total_fix_sessions_by_bucket={"has_tests": 0, "has_typecheck": 0, "neither": 10},
+            gaps_by_bucket={"has_tests": 0, "has_typecheck": 0, "neither": 10},
+            gap_rate_by_bucket={"has_tests": None, "has_typecheck": None, "neither": None},
+            low_sample_by_bucket={"has_tests": True, "has_typecheck": True, "neither": False},
+        )
+        summary = format_terminal_summary(data)
+        assert "100%" not in summary
+        assert "10/10 fixes" not in summary
+        # Should surface the neither sessions descriptively, not as a gap rate
+        assert "non-verifiable projects" in summary
+        assert "10" in summary
+
+    def test_terminal_summary_per_bucket_rendering(self):
+        """Per-bucket breakdown: has_tests + has_typecheck both render with rates."""
+        from ambient.detect.verification import VerificationGap, VerificationGapFindings
+        data = _fully_populated_data()
+        data.verification_gaps = VerificationGapFindings(
+            gaps=[],
+            total_fix_sessions=22,
+            gap_rate=None,
+            low_sample=False,
+            total_fix_sessions_by_bucket={"has_tests": 12, "has_typecheck": 10, "neither": 0},
+            gaps_by_bucket={"has_tests": 3, "has_typecheck": 2, "neither": 0},
+            gap_rate_by_bucket={"has_tests": 3 / 12, "has_typecheck": 2 / 10, "neither": None},
+            low_sample_by_bucket={"has_tests": False, "has_typecheck": False, "neither": True},
+        )
+        summary = format_terminal_summary(data)
+        assert "Verification gaps (tests): 3/12 fixes (25%)" in summary
+        assert "Verification gaps (typecheck): 2/10 fixes (20%)" in summary
 
     def test_top_trigger_prompt_in_terminal(self):
         data = _fully_populated_data()
@@ -707,35 +839,58 @@ class TestRichTerminalSummary:
 
 
 class TestPromptBudgetTrimming:
-    def test_caps_shrink_when_over_budget(self, tmp_path):
-        """When the prompt exceeds INSIGHTS_INPUT_BUDGET, caps shrink and the call still fires."""
+    def test_over_budget_logs_warning_but_still_fires(self, tmp_path, caplog, monkeypatch):
+        """v3 removed the proportional-shrink loop. When the prompt exceeds
+        INSIGHTS_INPUT_BUDGET, the run logs a warning and fires the full
+        prompt unchanged (confidence gates handle suppression upstream)."""
+        import logging
         from ambient.present import insights as insights_mod
 
         config = _config(base_dir=tmp_path)
-        # Pad with many raw_examples and long normalized_prompt to blow the budget
-        long_norm = "run a very very very long repeated prompt " * 40
-        patterns = [
-            PromptPattern(long_norm, [long_norm] * 5, 10, ["p"], "within_session")
-            for _ in range(200)
-        ]
         data = _fully_populated_data()
-        data.prompt_patterns = PromptPatternFindings(
-            patterns=patterns, total_prompts=2000
-        )
 
-        captured = {}
+        # Force the over-budget path by setting an absurdly small budget. The
+        # populated fixture's prompt is several thousand chars, well above 1.
+        monkeypatch.setattr(insights_mod, "INSIGHTS_INPUT_BUDGET", 1)
+
+        captured = {"prompt_len": 0}
 
         def fake_call_api(config, system, prompt, model, max_tokens=3000, client=None):
             captured["prompt_len"] = len(prompt)
-            return "trimmed-report"
+            return "report"
 
-        with patch("ambient.present.api.call_api", side_effect=fake_call_api):
-            result = insights_mod.generate_insights_report(data, config)
+        with caplog.at_level(logging.WARNING, logger="ambient.present.insights"):
+            with patch("ambient.present.api.call_api", side_effect=fake_call_api):
+                result = insights_mod.generate_insights_report(data, config)
 
-        assert result == "trimmed-report"
-        # Prompt got built and fired; trimming at minimum wrote the insights file
-        insight_files = list((tmp_path / "insights").glob("*.md"))
-        assert len(insight_files) == 1
+        assert result == "report"
+        # No shrinking occurred — full prompt sent
+        assert captured["prompt_len"] > 0
+        # And the over-budget warning fired
+        assert any(
+            "INSIGHTS_PROMPT_OVER_BUDGET" in record.message
+            for record in caplog.records
+        )
+
+    def test_under_budget_does_not_warn(self, tmp_path, caplog):
+        """Sanity check: a normal-sized prompt does not trigger the warning."""
+        import logging
+        from ambient.present import insights as insights_mod
+
+        config = _config(base_dir=tmp_path)
+        data = _fully_populated_data()
+
+        def fake_call_api(config, system, prompt, model, max_tokens=3000, client=None):
+            return "report"
+
+        with caplog.at_level(logging.WARNING, logger="ambient.present.insights"):
+            with patch("ambient.present.api.call_api", side_effect=fake_call_api):
+                insights_mod.generate_insights_report(data, config)
+
+        assert not any(
+            "INSIGHTS_PROMPT_OVER_BUDGET" in record.message
+            for record in caplog.records
+        )
 
 
 class TestPendingRecommendations:

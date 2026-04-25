@@ -21,6 +21,7 @@ from ambient.detect.coaching import (
 )
 from ambient.detect.compression import CompressionFindings, detect_compression
 from ambient.detect.correlator import CorrelationFindings, correlate_signals
+from ambient.detect.project_capabilities import clear_capability_cache
 from ambient.detect.prompt_patterns import (
     PromptPatternFindings,
     detect_prompt_patterns,
@@ -41,7 +42,9 @@ logger = logging.getLogger(__name__)
 
 INSIGHTS_INPUT_BUDGET = 30_000
 
-# Per-section example caps, scaled down proportionally when over budget
+# Per-section example caps. Sections suppress themselves when their evidence
+# list is empty (see Unit 8); over-budget runs log a warning rather than
+# shrink these caps. Phase 4's baseline anomaly gate will tighten further.
 _DEFAULT_CAPS = {
     "prompts_within": 10,
     "prompts_cross": 5,
@@ -58,34 +61,35 @@ _DEFAULT_CAPS = {
     "pending_recs": 10,
 }
 
-INSIGHTS_SYSTEM = """You are a developer-workflow analyst writing a weekly coaching report.
+INSIGHTS_SYSTEM = """You are a senior engineer reviewing a developer's week of work. The data is rich (real prompts, real commands, real file paths, real chains with failure-and-resolution context, real verification gaps bucketed by project capability). Your job is to produce a tight engineering review grounded in those specifics — not behavioral coaching, not generalities, not padding.
 
-The data you receive includes raw examples: actual prompts the developer typed, actual shell commands they ran, actual file paths they touched, actual resolution chains with the initial failing command and Claude's opening prompt. Your job is to write a coaching report grounded in those specifics — not generalities.
+Sections to produce, in this order. Only emit a section when the input data contains a corresponding section. If the input has no data for a topic, omit that section entirely from your output. Do not write "no data" or "insufficient sample" filler.
 
-Report sections to produce (in this order):
-1. **Top Finding** — the single most-actionable observation this week, in one paragraph. Cite at least one verbatim quote from the data.
-2. **Recurring Patterns** — the most-repeated prompts, command sequences, and workflows. Quote the normalized pattern text verbatim. Note which projects they appear in.
+1. **Top Finding** — the single most-actionable engineering observation this week, in one paragraph. Cite at least one verbatim quote from the data (a prompt, command, or file path).
+2. **Recurring Patterns** — the most-repeated prompts and command sequences. Quote the normalized pattern text verbatim. Note which projects they appear in.
 3. **Stuck Episode Analysis** — patterns in the stuck sessions, broken out by project, by failing tool, and by file cluster. Quote tool names and file paths from the data. When the data includes opening prompts for stuck sessions, quote at least one verbatim.
-4. **Verification Gaps** — when the data includes a verification-gap section, surface the rate (if not low-sample) and one specific example gap (session, file edited, project). If low-sample, say so and cite one example without a rate.
+4. **Verification Gaps** — when the data includes a verification-gap section, report the per-bucket rates ("projects with tests", "projects with typecheck/build only", "projects with no detected verification target"). The "neither" bucket is descriptive, not a gap — projects with no test or typecheck target cannot be verified by definition; do not frame those sessions as the developer skipping tests. When a bucket is low-sample, hedge or omit. Cite one specific example gap (session id, file edited, project).
 5. **Resolution Velocity** — how quickly problems close. Cite avg/median/p90 and at least one example resolved chain. When abandoned chains have specific reason codes (interrupt_mid_thought, context_rot, given_up, end_of_window), narrate WHY chains aren't closing, not just that they aren't.
-6. **Trend vs. Prior Week** — if the period comparison has data, state the deltas. If "insufficient data" is reported, say so explicitly and do not invent trends.
-7. **Surprise of the Week** — exactly one non-obvious observation the algorithmic detectors did NOT highlight directly. It must cross-reference two data sources (e.g., a prompt pattern AND a stuck file cluster, or a command sequence AND a correlation pattern). Cite the specific data. If no real surprise exists, write exactly: "No surprise identified this week — patterns were consistent with the algorithmic summary." Do not invent a surprise to fill space.
-8. **Anti-Pattern Callout** — exactly ONE specific stop-doing for the week, grounded in the data. Be concrete ("stop opening sessions with 'figure out why X'" — not "communicate more clearly"). Must cite the data that motivates it. If the data does not support a single clear anti-pattern, write exactly: "No single anti-pattern stands out this week." Do not pad with a list.
-9. **Coaching Recommendations** — 2-3 specific suggestions. For each, cite the data that motivates it (count, project, chain, or file cluster). If any pending recommendation in the data matches the finding, reference its id.
+6. **Trend vs. Prior Week** — only when the period-comparison section is present in the input. State the deltas in plain numbers. Never invent a trend.
+7. **Surprise of the Week** — exactly one non-obvious cross-signal observation the algorithmic detectors did NOT highlight directly. Must cross-reference two data sources (e.g., a prompt pattern AND a stuck file cluster, or a command sequence AND a correlation pattern). Cite the specific data. If no real surprise exists, omit this section entirely. Do not invent a surprise to fill space.
+8. **Diagnostic Questions** — conclude with exactly three questions a senior engineer would ask the developer after reading this report. Each question must reference a specific data point above (count, project, file, command, chain id) and be answerable in one sentence. Do not issue directives. Do not prescribe behavior changes. The goal is to force the developer's own synthesis, not to tell them what to do.
+
+Pending recommendations, when present in the input, are surfaced in an appendix you do not need to write — the report renderer handles that separately.
 
 Rules:
 - Every claim about a pattern must be grounded in a verbatim quote from the data — a prompt, command, file path, or tool name. No generic phrasing like "you often type similar prompts" without a specific quoted example.
-- When a metric is below sample threshold (marked "insufficient sample" or "low sample" in the data), hedge explicitly or omit the claim. Do not report averages or trends on insufficient samples.
+- When a metric is below sample threshold (marked "low sample" in the data), hedge explicitly or omit the claim. Do not report averages or trends on insufficient samples.
 - Prefer concrete counts and durations over vague language. "You ran `pytest -x && git add` 14 times" beats "you often run this sequence".
-- If a section has no data (empty or zero), write one line acknowledging that and move on. Don't pad.
-- Length: aim for 800-1,100 words total. Density over breadth.
+- A section absent from the input means the corresponding finding has no support. Omit, do not acknowledge.
+- A 100% rate on any metric is suspect — call it out and ask whether the detector is correct, rather than presenting it as a confident finding.
+- Do not grade the developer's continuation prompts ("go for it", "yes lets fix these") as risk signals. These are normal acceptance responses; the agent's planning posture before editing is the relevant signal, not the developer's reply after.
+- Length: aim for 600-900 words total. Density over breadth. Shorter when there is less to say.
 
 Vocabulary — prefer these industry-standard terms when naming patterns, so language stays consistent across weeks:
 - **prompt debt**: near-duplicate prompts accumulating across sessions — asking variants of the same question repeatedly.
-- **verification gap**: a fix that shipped without a subsequent test run proving it worked.
+- **verification gap**: a fix that shipped without a subsequent verifying command (test or typecheck/build, depending on project capability) proving it worked.
 - **context rot**: a Claude session dominated by Read/Grep/ToolSearch calls with no Edit/Write — the agent hunted for context it couldn't find.
 - **cognitive debt**: loss of comprehension from fast AI-generated output — code that ships without the developer understanding the full system.
-- **vague framing**: opening a session with imprecise direction ("figure out why X", "fix this", "debug it") rather than a specific goal.
 - **interrupt mid-thought**: a session that ended with the agent blocked on a user confirmation (AskUserQuestion) rather than completing its work.
 """
 
@@ -266,6 +270,10 @@ def compute_period_comparison(
 def aggregate_coaching_data(
     config: Config, window_days: int = 7, compare: bool = True
 ) -> CoachingData:
+    # Reset the per-run project-capability cache so each insights run sees a
+    # fresh probe (capabilities can change between runs as projects evolve).
+    clear_capability_cache()
+
     end = datetime.now()
     start = end - timedelta(days=window_days)
     current = _aggregate_window(config, start, end, window_days)
@@ -311,10 +319,9 @@ def _section_recurring_prompts(data: CoachingData, caps: dict) -> list[str]:
     cross_norms = {p.normalized_prompt for p in cross}
     within = [p for p in within if p.normalized_prompt not in cross_norms]
 
-    lines = [f"\nRECURRING PROMPTS ({data.prompt_patterns.total_prompts} prompts analyzed):"]
     if not within and not cross:
-        lines.append("  None detected above the frequency floor.")
-        return lines
+        return []
+    lines = [f"\nRECURRING PROMPTS ({data.prompt_patterns.total_prompts} prompts analyzed):"]
 
     if within:
         lines.append("  Within-session (same session, repeated):")
@@ -334,10 +341,9 @@ def _section_recurring_prompts(data: CoachingData, caps: dict) -> list[str]:
 
 def _section_command_sequences(data: CoachingData, caps: dict) -> list[str]:
     sequences = data.compression.sequences[: caps["sequences"]]
-    lines = ["\nRECURRING COMMAND SEQUENCES:"]
     if not sequences:
-        lines.append("  None detected above the frequency floor.")
-        return lines
+        return []
+    lines = ["\nRECURRING COMMAND SEQUENCES:"]
     for s in sequences:
         seq_text = " -> ".join(_truncate(c, 60) for c in s.sequence)
         total_min = s.total_time_ms / 60000
@@ -348,10 +354,9 @@ def _section_command_sequences(data: CoachingData, caps: dict) -> list[str]:
 
 
 def _section_correlations(data: CoachingData, caps: dict) -> list[str]:
-    lines = ["\nSHELL ↔ CLAUDE CORRELATIONS:"]
     if not data.correlations.patterns:
-        lines.append("  None detected in this window.")
-        return lines
+        return []
+    lines = ["\nSHELL ↔ CLAUDE CORRELATIONS:"]
     for p in data.correlations.patterns:
         lines.append(f"  {p.pattern_type}: {p.count} occurrences")
         for ex in p.examples[: caps["correlation_examples"]]:
@@ -370,10 +375,9 @@ def _section_resolution_chains(data: CoachingData, caps: dict) -> list[str]:
     resolved = resolved[: caps["resolution_chains_resolved"]]
     unresolved = unresolved[: caps["resolution_chains_unresolved"]]
 
-    lines = ["\nTOP RESOLUTION CHAINS:"]
     if not data.chains:
-        lines.append("  No chains in this window.")
-        return lines
+        return []
+    lines = ["\nTOP RESOLUTION CHAINS:"]
     if resolved:
         lines.append("  Resolved (fastest first):")
         for c in resolved:
@@ -398,6 +402,8 @@ def _section_resolution_chains(data: CoachingData, caps: dict) -> list[str]:
 def _section_session_outcomes(data: CoachingData) -> list[str]:
     counts = data.coaching_findings.count_by_classification
     total = sum(counts.values())
+    if total == 0:
+        return []
     lines = [f"\nSESSION OUTCOMES ({total} sessions):"]
     for cls in ("productive", "friction", "quick", "abandoned"):
         n = counts.get(cls, 0)
@@ -411,12 +417,6 @@ def _section_session_outcomes(data: CoachingData) -> list[str]:
     return lines
 
 
-def _format_framing(frac: float | None) -> str:
-    if frac is None:
-        return ""
-    return f" | vague framing: {frac * 100:.0f}%"
-
-
 def _format_opening_prompts(prompts: list[str], cap: int) -> list[str]:
     """Render up to `cap` verbatim opening prompts as indented quoted lines."""
     if not prompts:
@@ -426,10 +426,9 @@ def _format_opening_prompts(prompts: list[str], cap: int) -> list[str]:
 
 def _section_stuck_by_project(data: CoachingData, caps: dict) -> list[str]:
     sp = data.stuck_patterns
-    lines = [f"\nSTUCK PATTERNS — BY PROJECT ({sp.total_stuck_sessions} stuck sessions):"]
     if not sp.patterns:
-        lines.append("  No stuck patterns detected.")
-        return lines
+        return []
+    lines = [f"\nSTUCK PATTERNS — BY PROJECT ({sp.total_stuck_sessions} stuck sessions):"]
     for p in sp.patterns[: caps["stuck_projects"]]:
         thrash_str = (
             f"avg thrash {p.avg_thrash_score:.2f}"
@@ -440,7 +439,6 @@ def _section_stuck_by_project(data: CoachingData, caps: dict) -> list[str]:
             f"  {p.project}: {p.episode_count} episodes, {thrash_str}, "
             f"tools: {', '.join(p.failing_tools)}, "
             f"total time: {p.total_duration_ms / 60000:.1f}min"
-            f"{_format_framing(p.vague_framing_fraction)}"
         )
         if p.file_cluster and p.file_cluster != ["unknown"]:
             lines.append(f"    files: {', '.join(p.file_cluster[:5])}")
@@ -450,10 +448,9 @@ def _section_stuck_by_project(data: CoachingData, caps: dict) -> list[str]:
 
 def _section_stuck_by_tool(data: CoachingData, caps: dict) -> list[str]:
     tools = data.stuck_patterns.tool_level_patterns[: caps["stuck_tools"]]
-    lines = ["\nSTUCK PATTERNS — BY FAILING TOOL:"]
     if not tools:
-        lines.append("  No cross-project tool patterns.")
-        return lines
+        return []
+    lines = ["\nSTUCK PATTERNS — BY FAILING TOOL:"]
     for t in tools:
         thrash_str = (
             f"avg thrash {t.avg_thrash_score:.2f}"
@@ -464,7 +461,6 @@ def _section_stuck_by_tool(data: CoachingData, caps: dict) -> list[str]:
             f"  {t.tool_name}: {t.episode_count} stuck sessions across "
             f"{len(t.projects)} project(s) [{', '.join(t.projects)}], "
             f"{thrash_str}, total time: {t.total_duration_ms / 60000:.1f}min"
-            f"{_format_framing(t.vague_framing_fraction)}"
         )
         lines.extend(_format_opening_prompts(t.opening_prompts, caps["stuck_opening_prompts"]))
     return lines
@@ -472,42 +468,83 @@ def _section_stuck_by_tool(data: CoachingData, caps: dict) -> list[str]:
 
 def _section_stuck_by_cluster(data: CoachingData, caps: dict) -> list[str]:
     clusters = data.stuck_patterns.file_cluster_patterns[: caps["stuck_clusters"]]
-    lines = ["\nSTUCK PATTERNS — BY FILE CLUSTER:"]
     if not clusters:
-        lines.append("  No multi-session file clusters.")
-        return lines
+        return []
+    lines = ["\nSTUCK PATTERNS — BY FILE CLUSTER:"]
     for c in clusters:
         lines.append(
             f"  {c.path_fragment}: {c.episode_count} stuck sessions "
             f"[{', '.join(c.projects)}], tools: {', '.join(c.failing_tools)}, "
             f"total time: {c.total_duration_ms / 60000:.1f}min"
-            f"{_format_framing(c.vague_framing_fraction)}"
         )
         lines.extend(_format_opening_prompts(c.opening_prompts, caps["stuck_opening_prompts"]))
     return lines
 
 
+_BUCKET_LABELS = {
+    "has_tests": "projects with tests",
+    "has_typecheck": "projects with typecheck/build only",
+    "neither": "projects with no detected verification target",
+}
+
+
 def _section_verification_gaps(data: CoachingData, caps: dict) -> list[str]:
     vg = data.verification_gaps
-    lines = ["\nVERIFICATION GAPS (fixes not followed by a verifying test run):"]
     if vg.total_fix_sessions == 0:
-        lines.append("  No fix sessions (Edit/Write) in this window.")
-        return lines
-    if vg.low_sample:
-        lines.append(
-            f"  {len(vg.gaps)} gap(s) of {vg.total_fix_sessions} fix sessions "
-            "(low sample — no rate published)"
-        )
-    else:
-        pct = (vg.gap_rate or 0) * 100
-        lines.append(
-            f"  {len(vg.gaps)} of {vg.total_fix_sessions} fix sessions shipped "
-            f"without a verifying test run ({pct:.0f}%)"
-        )
+        return []
+    # Suppress the section header entirely when only `neither`-bucket sessions
+    # exist — those projects have no verification capability so framing them as
+    # "verification gaps" is a category error. The terminal summary surfaces
+    # the count under "Fixes in non-verifiable projects" instead.
+    verifiable = (
+        vg.total_fix_sessions_by_bucket.get("has_tests", 0)
+        + vg.total_fix_sessions_by_bucket.get("has_typecheck", 0)
+    )
+    if verifiable == 0:
+        return []
+    lines = [
+        "\nVERIFICATION GAPS (fixes not followed by a verifying command,"
+        " bucketed by project capability):"
+    ]
+
+    # Per-bucket headlines so readers see which projects can actually be
+    # verified at all, separately from which ones skipped verification.
+    for bucket in ("has_tests", "has_typecheck", "neither"):
+        total = vg.total_fix_sessions_by_bucket.get(bucket, 0)
+        if total == 0:
+            continue
+        bucket_gaps = vg.gaps_by_bucket.get(bucket, 0)
+        label = _BUCKET_LABELS[bucket]
+        if bucket == "neither":
+            lines.append(
+                f"  {label}: {total} fix session(s) — no verification possible"
+                " (no test or typecheck target detected)"
+            )
+            continue
+        if vg.low_sample_by_bucket.get(bucket, False):
+            lines.append(
+                f"  {label}: {bucket_gaps} gap(s) of {total} fix session(s)"
+                " (low sample — no rate published)"
+            )
+        else:
+            rate = vg.gap_rate_by_bucket.get(bucket)
+            pct = (rate or 0) * 100
+            lines.append(
+                f"  {label}: {bucket_gaps} of {total} fix session(s) shipped"
+                f" without a verifying command ({pct:.0f}%)"
+            )
+
+    # Example gaps, capped. Annotate each with its bucket so the reader can
+    # tell test-skipped from no-target-exists at a glance.
     for g in vg.gaps[: caps["verification_gaps"]]:
         files_preview = ", ".join(g.edited_files[:3]) if g.edited_files else "(no files)"
+        bucket_note = (
+            "" if g.bucket == "has_tests"
+            else f" [{g.bucket}]"
+        )
         lines.append(
-            f"    [{g.project}] session {g.session_id[:12]}… edited: {files_preview}"
+            f"    [{g.project}]{bucket_note} session {g.session_id[:12]}…"
+            f" edited: {files_preview}"
         )
     return lines
 
@@ -515,10 +552,9 @@ def _section_verification_gaps(data: CoachingData, caps: dict) -> list[str]:
 def _section_abandonment_reasons(data: CoachingData, caps: dict) -> list[str]:
     v = data.velocity_metrics
     by_reason = v.by_reason or {}
-    lines = ["\nABANDONMENT BY REASON:"]
     if not by_reason:
-        lines.append("  No chains in this window.")
-        return lines
+        return []
+    lines = ["\nABANDONMENT BY REASON:"]
     # Order: specific idle codes first, then end_of_window, then matched_success
     order = (
         "matched_success",
@@ -552,6 +588,8 @@ def _section_abandonment_reasons(data: CoachingData, caps: dict) -> list[str]:
 
 def _section_velocity(data: CoachingData) -> list[str]:
     v = data.velocity_metrics
+    if v.total_chains == 0:
+        return []
     lines = [f"\nRESOLUTION VELOCITY ({v.total_chains} chains, {v.resolved_count} resolved):"]
     if v.by_reason:
         matched = v.by_reason.get("matched_success", 0)
@@ -575,14 +613,13 @@ def _section_velocity(data: CoachingData) -> list[str]:
 
 
 def _section_period_comparison(data: CoachingData) -> list[str]:
-    lines = ["\nPERIOD COMPARISON (current vs. prior equal-length window):"]
     c = data.comparison
-    if c is None:
-        lines.append("  Not computed (compare=False).")
-        return lines
-    if c.insufficient_data_reason:
-        lines.append(f"  Insufficient data for trend comparison: {c.insufficient_data_reason}")
-        return lines
+    # Suppress entirely when there's nothing real to compare. The narrative
+    # layer is instructed to stay silent on trends rather than pad with
+    # "insufficient data" prose.
+    if c is None or c.insufficient_data_reason:
+        return []
+    lines = ["\nPERIOD COMPARISON (current vs. prior equal-length window):"]
     lines.append(f"  Prior window: {c.prior_date_range}")
     if c.velocity_delta_ms is not None:
         direction = "faster" if c.velocity_delta_ms < 0 else "slower"
@@ -603,10 +640,9 @@ def _section_period_comparison(data: CoachingData) -> list[str]:
 
 def _section_pending_recommendations(data: CoachingData, caps: dict) -> list[str]:
     recs = data.pending_recommendations[: caps["pending_recs"]]
-    lines = ["\nPENDING RECOMMENDATIONS (staged in ~/.ambient/recommendations/):"]
     if not recs:
-        lines.append("  None.")
-        return lines
+        return []
+    lines = ["\nPENDING RECOMMENDATIONS (staged in ~/.ambient/recommendations/):"]
     for r in recs:
         lines.append(f"  [{r.get('type', 'unknown')}] {r.get('id')} — {r.get('title', '')}")
     return lines
@@ -646,7 +682,14 @@ def _delta_suffix(current: float | int, delta: float | int | None, *, unit: str 
 def format_terminal_summary(data: CoachingData) -> str:
     lines = [f"Ambient Insights — {data.date_range}\n"]
 
+    # Treat a comparison with insufficient_data_reason as no comparison at
+    # all, matching _section_period_comparison's behavior. Otherwise the
+    # terminal summary can render delta suffixes computed from data the
+    # prompt-builder explicitly suppressed.
     cmp = data.comparison
+    if cmp is not None and cmp.insufficient_data_reason:
+        cmp = None
+
     v = data.velocity_metrics
     if v.resolved_count > 0:
         velocity_delta = cmp.velocity_delta_ms if cmp and cmp.velocity_delta_ms is not None else None
@@ -686,20 +729,27 @@ def format_terminal_summary(data: CoachingData) -> str:
 
     lines.append(f"Pending recs:         {len(data.pending_recommendations)}")
 
-    # Verification gaps — hedge when sample too low
+    # Verification gaps — render per bucket so all-neither workloads don't
+    # surface as "100% verification gap" (the v2 failure mode this whole
+    # phase exists to fix).
     vg = data.verification_gaps
-    if vg.total_fix_sessions > 0:
-        if vg.low_sample:
-            lines.append(
-                f"Verification gaps:    {len(vg.gaps)}/{vg.total_fix_sessions} "
-                "fixes (low sample)"
-            )
+    for bucket, label in (("has_tests", "Verification gaps (tests)"),
+                          ("has_typecheck", "Verification gaps (typecheck)")):
+        total = vg.total_fix_sessions_by_bucket.get(bucket, 0)
+        if total == 0:
+            continue
+        bucket_gaps = vg.gaps_by_bucket.get(bucket, 0)
+        if vg.low_sample_by_bucket.get(bucket, False):
+            lines.append(f"{label}: {bucket_gaps}/{total} fixes (low sample)")
         else:
-            pct = (vg.gap_rate or 0) * 100
-            lines.append(
-                f"Verification gaps:    {len(vg.gaps)}/{vg.total_fix_sessions} fixes "
-                f"({pct:.0f}%)"
-            )
+            rate = vg.gap_rate_by_bucket.get(bucket) or 0
+            lines.append(f"{label}: {bucket_gaps}/{total} fixes ({rate * 100:.0f}%)")
+    neither_total = vg.total_fix_sessions_by_bucket.get("neither", 0)
+    if neither_total > 0:
+        lines.append(
+            f"Fixes in non-verifiable projects: {neither_total} "
+            "(no test or typecheck target detected)"
+        )
 
     # Top trigger prompt — the opening prompt of the longest stuck episode, if any
     if sp.patterns and sp.patterns[0].opening_prompts:
@@ -718,41 +768,30 @@ def format_terminal_summary(data: CoachingData) -> str:
     return "\n".join(lines)
 
 
-def _shrink_caps(caps: dict, factor: float = 0.7) -> dict:
-    """Scale every section cap by a factor, floor at 1."""
-    return {key: max(1, int(value * factor)) for key, value in caps.items()}
-
-
 def generate_insights_report(data: CoachingData, config: Config, client=None) -> str | None:
     from ambient.present.tokens import estimate_tokens
 
     caps = dict(_DEFAULT_CAPS)
     prompt = build_insights_prompt(data, caps)
     estimated = estimate_tokens(INSIGHTS_SYSTEM) + estimate_tokens(prompt)
-    original_caps = dict(caps)
 
-    # Proportional trim across all sections; each pass shrinks every cap by 30%
-    # and floors at 1 so the section header + at least one example survive.
-    trim_iterations = 0
-    while estimated > INSIGHTS_INPUT_BUDGET and any(v > 1 for v in caps.values()):
-        caps = _shrink_caps(caps, factor=0.7)
-        prompt = build_insights_prompt(data, caps)
-        estimated = estimate_tokens(INSIGHTS_SYSTEM) + estimate_tokens(prompt)
-        trim_iterations += 1
-        if trim_iterations > 20:
-            break  # safety: can't shrink further, send as-is
-
-    if trim_iterations:
-        logger.info(
-            "PROMPT_TRIMMED call_type=insights iterations=%d caps_before=%s caps_after=%s",
-            trim_iterations, original_caps, caps,
+    # Confidence gates suppress weak sections at assembly time, so a runaway
+    # prompt is now a sign of real signal volume rather than padding. Log a
+    # warning if we exceed the soft budget; do not silently shrink strong
+    # sections to fit. Phase 4's baseline anomaly gate will tighten further.
+    if estimated > INSIGHTS_INPUT_BUDGET:
+        logger.warning(
+            "INSIGHTS_PROMPT_OVER_BUDGET estimated=%d budget=%d "
+            "(no shrink applied; confidence gates handle suppression)",
+            estimated, INSIGHTS_INPUT_BUDGET,
         )
 
     try:
         from ambient.present.api import call_api
         narrative = call_api(config, INSIGHTS_SYSTEM, prompt, config.sonnet_model,
                             max_tokens=3000, client=client)
-    except Exception:
+    except Exception as exc:
+        logger.warning("INSIGHTS_NARRATIVE_FAILED error=%s", exc)
         return None
 
     date_str = datetime.now().strftime("%Y-%m-%d")

@@ -77,6 +77,26 @@ class Config:
         "deno test",
         "rspec",
     ])
+    # Build/typecheck commands that count as verification for projects that
+    # have no test target but do have a typecheck or build step. Used by the
+    # project-aware verification-gap detector for the `has_typecheck` bucket.
+    verification_typecheck_command_patterns: list[str] = field(default_factory=lambda: [
+        "tsc",
+        "pnpm typecheck",
+        "pnpm type-check",
+        "npm run typecheck",
+        "npm run type-check",
+        "yarn typecheck",
+        "yarn type-check",
+        "next build",
+        "vite build",
+        "tsup",
+        "cargo check",
+        "cargo build",
+        "go build",
+        "mypy",
+        "pyright",
+    ])
 
     # Stuck-loop trigger-prompt diagnostic (Unit 3)
     coaching_vague_framing_patterns: list[str] = field(default_factory=lambda: [
