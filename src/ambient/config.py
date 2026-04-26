@@ -124,6 +124,10 @@ class Config:
     default_window_minutes: int = 30
     weekly_min_weeks: int = 2
 
+    # Command-mix detector: per-project floor for inclusion in per_project map.
+    # Below this floor, prompts still roll into the overall mix.
+    command_mix_min_prompts: int = 10
+
     # Slash-command taxonomy: per-user reclassification of custom commands.
     # Maps "/command" → category ("planning"|"execution"|"review"|"design"|"meta"|"other").
     # Built-in classifications cover the validated set from the inventory;
