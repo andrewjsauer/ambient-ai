@@ -128,6 +128,9 @@ class Config:
     # Below this floor, prompts still roll into the overall mix.
     command_mix_min_prompts: int = 10
 
+    # Freeform-fraction detector: per-project floor for inclusion in per_project breakdown.
+    freeform_fraction_min_prompts: int = 20
+
     # Slash-command taxonomy: per-user reclassification of custom commands.
     # Maps "/command" → category ("planning"|"execution"|"review"|"design"|"meta"|"other").
     # Built-in classifications cover the validated set from the inventory;
