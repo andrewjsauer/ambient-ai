@@ -124,6 +124,13 @@ class Config:
     default_window_minutes: int = 30
     weekly_min_weeks: int = 2
 
+    # Slash-command taxonomy: per-user reclassification of custom commands.
+    # Maps "/command" → category ("planning"|"execution"|"review"|"design"|"meta"|"other").
+    # Built-in classifications cover the validated set from the inventory;
+    # this field lets users add or reroute their own custom commands without
+    # editing slash_taxonomy.py.
+    slash_taxonomy_overrides: dict[str, str] = field(default_factory=dict)
+
     # Daemon
     daemon_dir: Path = field(default=None)
     claude_history_path: Path = field(default=None)
