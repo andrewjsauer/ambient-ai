@@ -19,13 +19,19 @@ from ambient.detect.coaching import (
     classify_sessions,
     group_stuck_patterns,
 )
+from ambient.detect.command_mix import CommandMixFindings, detect_command_mix
 from ambient.detect.compression import CompressionFindings, detect_compression
 from ambient.detect.correlator import CorrelationFindings, correlate_signals
+from ambient.detect.freeform_fraction import (
+    FreeformFraction,
+    detect_freeform_fraction,
+)
 from ambient.detect.git_activity import (
     GitActivityFindings,
     detect_git_activity,
 )
 from ambient.detect.project_capabilities import clear_capability_cache
+from ambient.detect.project_ledger import ProjectLedger, detect_project_ledger
 from ambient.detect.prompt_patterns import (
     PromptPatternFindings,
     detect_prompt_patterns,
@@ -71,14 +77,16 @@ INSIGHTS_SYSTEM = """You are a senior engineer reviewing a developer's week of w
 Sections to produce, in this order. Only emit a section when the input data contains a corresponding section. If the input has no data for a topic, omit that section entirely from your output. Do not write "no data" or "insufficient sample" filler.
 
 1. **What Shipped** — when the GIT ACTIVITY section is present in the input, open the report by naming what actually shipped this window. Cite specific commit subjects and per-project commit counts. This is the denominator against which every later finding should be framed. When GIT ACTIVITY is absent (no commits in any project this window), omit this section like any other — do not write "no commits" filler.
-2. **Top Finding** — the single most-actionable engineering observation this window, in one paragraph. Cite at least one verbatim quote from the data (a prompt, command, file path, or commit). Frame it against shipped work when possible.
-3. **Recurring Patterns** — the most-repeated prompts and command sequences. Quote the normalized pattern text verbatim. Note which projects they appear in.
-4. **Stuck Episode Analysis** — patterns in the stuck sessions, broken out by project, by failing tool, and by file cluster. Quote tool names and file paths from the data. When the data includes opening prompts for stuck sessions, quote at least one verbatim.
-5. **Verification Gaps** — when the data includes a verification-gap section, report the per-bucket rates ("projects with tests", "projects with typecheck/build only", "projects with no detected verification target"). The "neither" bucket is descriptive, not a gap — projects with no test or typecheck target cannot be verified by definition; do not frame those sessions as the developer skipping tests. When a bucket is low-sample, hedge or omit. Cite one specific example gap (session id, file edited, project).
-6. **Resolution Velocity** — how quickly problems close. Cite avg/median/p90 and at least one example resolved chain. When abandoned chains have specific reason codes (interrupt_mid_thought, context_rot, given_up, end_of_window), narrate WHY chains aren't closing, not just that they aren't.
-7. **Trend vs. Prior Week** — only when the period-comparison section is present in the input. State the deltas in plain numbers. Never invent a trend.
-8. **Surprise of the Week** — exactly one non-obvious cross-signal observation the algorithmic detectors did NOT highlight directly. Must cross-reference two data sources (e.g., a prompt pattern AND a stuck file cluster, a command sequence AND a correlation pattern, or a commit AND a verification gap). Cite the specific data. If no real surprise exists, omit this section entirely. Do not invent a surprise to fill space.
-9. **Diagnostic Questions** — conclude with exactly three questions a senior engineer would ask the developer after reading this report. Each question must reference a specific data point above (count, project, file, command, chain id, or commit) and be answerable in one sentence. Do not issue directives. Do not prescribe behavior changes. The goal is to force the developer's own synthesis, not to tell them what to do.
+2. **What You Worked On** — when the PROJECT LEDGER section is present, name the top projects by active time. For each, cite the active time, top files touched, and the one-line summary verbatim. Quote the user's distinctive wording from the recent prompts where it appears in the summary. Do not invent specifics not present in the input. When PROJECT LEDGER is absent, omit this section.
+3. **Command Mix** — when the COMMAND MIX section is present, report the planning/execution/review ratios per project. Frame as signal, not prescription: a high freeform fraction means most work bypasses structured commands, which is a fact about how the developer works, not a problem to fix. When COMMAND MIX is absent, omit this section.
+4. **Top Finding** — the single most-actionable engineering observation this window, in one paragraph. Cite at least one verbatim quote from the data (a prompt, command, file path, or commit). Frame it against shipped work when possible.
+5. **Recurring Patterns** — the most-repeated prompts and command sequences. Quote the normalized pattern text verbatim. Note which projects they appear in.
+6. **Stuck Episode Analysis** — patterns in the stuck sessions, broken out by project, by failing tool, and by file cluster. Quote tool names and file paths from the data. When the data includes opening prompts for stuck sessions, quote at least one verbatim.
+7. **Verification Gaps** — when the data includes a verification-gap section, report the per-bucket rates ("projects with tests", "projects with typecheck/build only", "projects with no detected verification target"). The "neither" bucket is descriptive, not a gap — projects with no test or typecheck target cannot be verified by definition; do not frame those sessions as the developer skipping tests. When a bucket is low-sample, hedge or omit. Cite one specific example gap (session id, file edited, project).
+8. **Resolution Velocity** — how quickly problems close. Cite avg/median/p90 and at least one example resolved chain. When abandoned chains have specific reason codes (interrupt_mid_thought, context_rot, given_up, end_of_window), narrate WHY chains aren't closing, not just that they aren't.
+9. **Trend vs. Prior Week** — only when the period-comparison section is present in the input. State the deltas in plain numbers. Never invent a trend.
+10. **Surprise of the Week** — exactly one non-obvious cross-signal observation the algorithmic detectors did NOT highlight directly. Must cross-reference two data sources (e.g., a prompt pattern AND a stuck file cluster, a command sequence AND a correlation pattern, or a commit AND a verification gap). Cite the specific data. If no real surprise exists, omit this section entirely. Do not invent a surprise to fill space.
+11. **Diagnostic Questions** — conclude with exactly three questions a senior engineer would ask the developer after reading this report. Each question must reference a specific data point above (count, project, file, command, chain id, or commit) and be answerable in one sentence. Do not issue directives. Do not prescribe behavior changes. The goal is to force the developer's own synthesis, not to tell them what to do.
 
 Pending recommendations, when present in the input, are surfaced in an appendix you do not need to write — the report renderer handles that separately.
 
@@ -148,6 +156,23 @@ class CoachingData:
     # v3 Unit 3: per-project shipped-work summary from `git log`. Surfaced as
     # the FIRST section of the prompt so every later finding has a denominator.
     git_activity: GitActivityFindings = field(default_factory=GitActivityFindings)
+    # v4 Phase 1 Unit 4: per-project ledger of what the user worked on
+    # (active time, top files, LLM-summarized one-liner). Optional — None when
+    # the detector was skipped (e.g. test fixtures or aggregation failures).
+    project_ledger: ProjectLedger | None = None
+    # v4 Phase 1 Unit 2: per-project intent mix (planning/execution/review/...)
+    command_mix: CommandMixFindings | None = None
+    # v4 Phase 1 Unit 3: % of prompts with no slash command, plus prior delta.
+    freeform_fraction: FreeformFraction | None = None
+    # v4 Phase 1 Unit 5: render mode flag. When True, format_terminal_summary
+    # emits a daily timeline view of project_ledger + command_mix instead of
+    # the aggregate. The LLM prompt is unchanged regardless.
+    by_day: bool = False
+    # Raw events captured during aggregation; used by the by-day renderer to
+    # bucket time per local day without re-reading the event log. None when
+    # not yet populated (e.g. test fixtures); the by-day renderer treats None
+    # the same as an empty list.
+    events: list | None = None
 
 
 def _safe_run(fn, *args, default, label, **kwargs):
@@ -209,6 +234,27 @@ def _aggregate_window(
         label="git_activity",
     )
 
+    # v4 Phase 1: command mix + freeform fraction read ~/.claude/projects/*.jsonl
+    # directly via the shared session walk; project ledger reuses the existing
+    # event stream for time + files. All three degrade to None on failure.
+    command_mix = _safe_run(
+        detect_command_mix, config.claude_projects_dir, start, end, config,
+        default=None,
+        label="command_mix",
+    )
+    prior_window_start = start - (end - start)
+    freeform_fraction = _safe_run(
+        detect_freeform_fraction, config.claude_projects_dir, start, end, config,
+        prior_window_start=prior_window_start, prior_window_end=start,
+        default=None,
+        label="freeform_fraction",
+    )
+    project_ledger = _safe_run(
+        detect_project_ledger, events, config.claude_projects_dir, start, end, config,
+        default=None,
+        label="project_ledger",
+    )
+
     return CoachingData(
         coaching_findings=findings,
         stuck_patterns=stuck,
@@ -221,6 +267,10 @@ def _aggregate_window(
         correlations=correlations,
         verification_gaps=verification_gaps,
         git_activity=git_activity,
+        command_mix=command_mix,
+        freeform_fraction=freeform_fraction,
+        project_ledger=project_ledger,
+        events=events,
     )
 
 
@@ -443,6 +493,76 @@ def _section_git_activity(data: CoachingData, caps: dict) -> list[str]:
             )
         if len(commits) > cap:
             lines.append(f"    ... and {len(commits) - cap} more commit(s)")
+    return lines
+
+
+def _section_project_ledger(data: CoachingData, caps: dict) -> list[str]:
+    """v4 Phase 1 Unit 5: render the per-project ledger (active time + summary)."""
+    pl = data.project_ledger
+    if pl is None or not pl.entries:
+        return []
+    time_label = "active time" if pl.time_basis == "attention_weighted" else "command-span time"
+    lines = [f"\nPROJECT LEDGER (what you worked on; {time_label}):"]
+    for entry in pl.entries:
+        minutes = entry.active_ms // 60_000
+        if minutes >= 60:
+            time_str = f"{minutes / 60:.1f}h"
+        else:
+            time_str = f"{minutes}min"
+        sessions = f"{entry.session_count} session(s)"
+        files_str = ""
+        if entry.top_files:
+            files_str = f", top files: {', '.join(entry.top_files[:5])}"
+        lines.append(f"  [{entry.project}] {time_str} · {sessions}{files_str}")
+        if entry.summary:
+            lines.append(f"    summary: {entry.summary}")
+    return lines
+
+
+def _section_command_mix(data: CoachingData, caps: dict) -> list[str]:
+    """v4 Phase 1 Unit 5: render planning/execution/review ratios."""
+    cm = data.command_mix
+    if cm is None or cm.overall.total == 0:
+        return []
+    lines = ["\nCOMMAND MIX (intent ratios; signal not prescription):"]
+    overall_ratios = cm.overall.ratios
+    lines.append(
+        "  Overall: "
+        f"plan {overall_ratios['planning'] * 100:.0f}% / "
+        f"exec {overall_ratios['execution'] * 100:.0f}% / "
+        f"review {overall_ratios['review'] * 100:.0f}% / "
+        f"freeform {overall_ratios['freeform'] * 100:.0f}% "
+        f"(of {cm.overall.total} prompts)"
+    )
+    for project, mix in sorted(cm.per_project.items(), key=lambda kv: kv[1].total, reverse=True):
+        ratios = mix.ratios
+        lines.append(
+            f"  [{project}] "
+            f"plan {ratios['planning'] * 100:.0f}% / "
+            f"exec {ratios['execution'] * 100:.0f}% / "
+            f"review {ratios['review'] * 100:.0f}% / "
+            f"freeform {ratios['freeform'] * 100:.0f}% "
+            f"(of {mix.total} prompts)"
+        )
+    return lines
+
+
+def _section_freeform_fraction(data: CoachingData, caps: dict) -> list[str]:
+    """v4 Phase 1 Unit 5: render % of prompts with no slash command + delta."""
+    ff = data.freeform_fraction
+    if ff is None or ff.total_prompts == 0:
+        return []
+    pct = ff.overall_pct * 100
+    delta_str = ""
+    if ff.delta_pct is not None:
+        sign = "+" if ff.delta_pct >= 0 else ""
+        delta_str = f" ({sign}{ff.delta_pct * 100:.1f}pp vs prior)"
+    lines = [
+        f"\nFREEFORM FRACTION ({pct:.1f}% of {ff.total_prompts} prompts had no slash command{delta_str}):"
+    ]
+    if ff.per_project:
+        for project, project_pct in sorted(ff.per_project.items(), key=lambda kv: kv[1], reverse=True):
+            lines.append(f"  [{project}] {project_pct * 100:.0f}%")
     return lines
 
 
@@ -703,6 +823,11 @@ def build_insights_prompt(data: CoachingData, caps: dict | None = None) -> str:
     # Git activity FIRST so every later finding has a denominator. The LLM
     # is instructed to anchor its top finding against shipped work.
     sections += _section_git_activity(data, caps)
+    # v4 Phase 1: project ledger → command mix → freeform fraction, in that order,
+    # right after "what shipped" so they share the same opening framing.
+    sections += _section_project_ledger(data, caps)
+    sections += _section_command_mix(data, caps)
+    sections += _section_freeform_fraction(data, caps)
     sections += _section_session_outcomes(data)
     sections += _section_recurring_prompts(data, caps)
     sections += _section_command_sequences(data, caps)
@@ -729,7 +854,79 @@ def _delta_suffix(current: float | int, delta: float | int | None, *, unit: str 
     return f"  ({sign}{delta:g}{unit} vs prior)"
 
 
+def _format_by_day_summary(data: CoachingData) -> str:
+    """v4 Phase 1 Unit 5: render the window as a per-day timeline.
+
+    Buckets events from `data.events` by local day, names the most-active
+    projects per day. Falls back to the aggregate render with a one-line note
+    when the window is shorter than 2 days (per-day view is meaningless for
+    ≤24h windows).
+    """
+    lines = [f"Ambient Insights — {data.date_range} (--by-day)\n"]
+    if data.window_days < 2:
+        lines.append("(window < 2 days; --by-day falls back to aggregate)")
+        from dataclasses import replace
+        aggregate = replace(data, by_day=False)
+        return "\n".join(lines) + "\n" + format_terminal_summary(aggregate)
+
+    events = data.events or []
+    if not events:
+        lines.append("No events recorded in this window.")
+        return "\n".join(lines)
+
+    from collections import defaultdict
+    daily_ms: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for event in events:
+        if event.duration_ms <= 0:
+            continue
+        day_key = datetime.fromtimestamp(event.ts_start / 1000).strftime("%a %b %d")
+        project = _project_label_for_event(event)
+        daily_ms[day_key][project] += event.duration_ms
+
+    if not daily_ms:
+        lines.append("No qualifying events in this window.")
+        return "\n".join(lines)
+
+    sorted_days = sorted(daily_ms.keys(), key=_parse_day_key)
+    for day in sorted_days:
+        per_project = sorted(daily_ms[day].items(), key=lambda kv: kv[1], reverse=True)
+        # Drop projects under 5 minutes from the daily line — too noisy.
+        meaningful = [(p, ms) for p, ms in per_project if ms >= 5 * 60_000]
+        if not meaningful:
+            continue
+        chunks = []
+        for project, ms in meaningful:
+            mins = ms // 60_000
+            chunks.append(f"{project} ({mins / 60:.1f}h)" if mins >= 60 else f"{project} ({mins}min)")
+        lines.append(f"  {day}:  " + " → ".join(chunks))
+
+    return "\n".join(lines)
+
+
+def _project_label_for_event(event) -> str:
+    from pathlib import PurePosixPath
+    if event.type == "claude_session" and event.claude_project:
+        return PurePosixPath(event.claude_project).name or "unknown"
+    if event.cwd:
+        name = PurePosixPath(event.cwd).name
+        if name in ("", "~", "/", "tmp"):
+            return "unknown"
+        return name
+    return "unknown"
+
+
+def _parse_day_key(day_key: str) -> datetime:
+    """Parse a 'Mon Apr 21' string back to a datetime for sorting."""
+    try:
+        return datetime.strptime(f"{datetime.now().year} {day_key}", "%Y %a %b %d")
+    except ValueError:
+        return datetime.min
+
+
 def format_terminal_summary(data: CoachingData) -> str:
+    if data.by_day:
+        return _format_by_day_summary(data)
+
     lines = [f"Ambient Insights — {data.date_range}\n"]
 
     # What shipped — anchors the rest of the summary in real work.
@@ -739,6 +936,26 @@ def format_terminal_summary(data: CoachingData) -> str:
             f"Shipped:              {ga.total_commits} commit(s) across "
             f"{len(ga.by_project)} project(s), {ga.total_lines_changed} lines changed"
         )
+
+    # What you worked on — top 3 projects by active time, with summary lines.
+    pl = data.project_ledger
+    if pl is not None and pl.entries:
+        for entry in pl.entries[:3]:
+            minutes = entry.active_ms // 60_000
+            time_str = f"{minutes / 60:.1f}h" if minutes >= 60 else f"{minutes}min"
+            line = f"Worked on:            [{entry.project}] {time_str} · {entry.session_count} session(s)"
+            if entry.summary:
+                line += f"\n                      {entry.summary}"
+            lines.append(line)
+
+    # Freeform fraction — single-line headline with delta.
+    ff = data.freeform_fraction
+    if ff is not None and ff.total_prompts > 0:
+        delta_str = ""
+        if ff.delta_pct is not None:
+            sign = "+" if ff.delta_pct >= 0 else ""
+            delta_str = f"  ({sign}{ff.delta_pct * 100:.1f}pp vs prior)"
+        lines.append(f"Freeform fraction:    {ff.overall_pct * 100:.0f}% of prompts{delta_str}")
 
     # Treat a comparison with insufficient_data_reason as no comparison at
     # all, matching _section_period_comparison's behavior. Otherwise the

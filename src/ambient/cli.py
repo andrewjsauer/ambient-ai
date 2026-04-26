@@ -366,9 +366,11 @@ def cmd_insights(config: Config, args):
         sys.exit(1)
 
     window = args.window if hasattr(args, "window") and args.window else 7
+    by_day = bool(getattr(args, "by_day", False))
 
     print(f"Analyzing last {window} days of activity...")
     data = aggregate_coaching_data(config, window_days=window)
+    data.by_day = by_day
 
     total_sessions = sum(data.coaching_findings.count_by_classification.values())
     if total_sessions < 3:
@@ -506,6 +508,10 @@ def main():
 
     insights_parser = subparsers.add_parser("insights", help="Generate coaching insights report")
     insights_parser.add_argument("--window", type=int, help="Analysis window in days (default: 7)")
+    insights_parser.add_argument(
+        "--by-day", dest="by_day", action="store_true",
+        help="Render the terminal summary as a per-day timeline instead of an aggregate.",
+    )
 
     projects_parser = subparsers.add_parser("projects", help="Show per-project time allocation")
     projects_parser.add_argument("--window", type=int, help="Analysis window in minutes")
