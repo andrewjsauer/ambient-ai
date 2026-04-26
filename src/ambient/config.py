@@ -131,6 +131,13 @@ class Config:
     # Freeform-fraction detector: per-project floor for inclusion in per_project breakdown.
     freeform_fraction_min_prompts: int = 20
 
+    # Project-ledger detector: per-project active-time floor (10 minutes default),
+    # top-files and prompt caps, and per-prompt truncation for the Haiku summary.
+    project_ledger_min_active_ms: int = 600_000  # 10 minutes
+    project_ledger_top_files_n: int = 5
+    project_ledger_summary_max_prompts: int = 30
+    project_ledger_summary_truncate_chars: int = 500
+
     # Slash-command taxonomy: per-user reclassification of custom commands.
     # Maps "/command" → category ("planning"|"execution"|"review"|"design"|"meta"|"other").
     # Built-in classifications cover the validated set from the inventory;
