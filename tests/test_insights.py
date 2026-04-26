@@ -189,6 +189,16 @@ class TestAggregateCoachingData:
         assert data.compression.sequences == []
         assert data.correlations.patterns == []
 
+    def test_git_activity_field_populated_on_empty_window(self, tmp_path):
+        """aggregate_coaching_data invokes detect_git_activity and surfaces
+        the result in CoachingData even when there are no events."""
+        from ambient.detect.git_activity import GitActivityFindings
+        config = _config(base_dir=tmp_path)
+        data = aggregate_coaching_data(config, window_days=7, compare=False)
+        assert isinstance(data.git_activity, GitActivityFindings)
+        assert data.git_activity.total_commits == 0
+        assert data.git_activity.by_project == {}
+
     def test_resets_capability_cache_each_run(self, tmp_path):
         """aggregate_coaching_data must clear the per-run capability cache so
         capability changes between runs (new package.json, removed Makefile)
@@ -460,6 +470,26 @@ def _fully_populated_data():
         thrash_delta=-0.05,
         prior_date_range="2026-04-03 to 2026-04-09",
     )
+    from ambient.detect.git_activity import GitActivityFindings, GitCommit
+    git_activity = GitActivityFindings(
+        by_project={
+            "auth": [
+                GitCommit(sha="abcdef0123456789", ts_iso="2026-04-15T10:00:00-04:00",
+                          author="dev", subject="feat: add login flow",
+                          files_changed=3, insertions=42, deletions=5),
+                GitCommit(sha="123456789abcdef0", ts_iso="2026-04-12T09:00:00-04:00",
+                          author="dev", subject="fix: handle expired token",
+                          files_changed=1, insertions=8, deletions=2),
+            ],
+            "frontend": [
+                GitCommit(sha="fedcba9876543210", ts_iso="2026-04-14T15:00:00-04:00",
+                          author="dev", subject="refactor: simplify checkout",
+                          files_changed=4, insertions=30, deletions=60),
+            ],
+        },
+        total_commits=3,
+        total_lines_changed=147,
+    )
     return CoachingData(
         coaching_findings=findings,
         stuck_patterns=stuck,
@@ -471,6 +501,7 @@ def _fully_populated_data():
         compression=compression,
         correlations=correlations,
         comparison=comparison,
+        git_activity=git_activity,
         pending_recommendations=[
             {"id": "skill-commit-this", "type": "skill", "title": "Commit this skill",
              "rationale": "repeated 7x"},
@@ -481,6 +512,7 @@ def _fully_populated_data():
 class TestRichBuildInsightsPrompt:
     def test_every_new_section_appears(self):
         prompt = build_insights_prompt(_fully_populated_data())
+        assert "GIT ACTIVITY" in prompt
         assert "RECURRING PROMPTS" in prompt
         assert "RECURRING COMMAND SEQUENCES" in prompt
         assert "SHELL ↔ CLAUDE CORRELATIONS" in prompt
@@ -490,6 +522,69 @@ class TestRichBuildInsightsPrompt:
         assert "STUCK PATTERNS — BY FILE CLUSTER" in prompt
         assert "PERIOD COMPARISON" in prompt
         assert "PENDING RECOMMENDATIONS" in prompt
+
+    def test_git_activity_is_first_section_after_header(self):
+        """Shipped work is the denominator for everything else; render first."""
+        prompt = build_insights_prompt(_fully_populated_data())
+        idx_git = prompt.find("GIT ACTIVITY")
+        idx_session = prompt.find("SESSION OUTCOMES")
+        idx_stuck = prompt.find("STUCK PATTERNS")
+        assert idx_git != -1
+        assert idx_git < idx_session
+        assert idx_git < idx_stuck
+
+    def test_git_activity_includes_commit_subjects_and_stats(self):
+        prompt = build_insights_prompt(_fully_populated_data())
+        # Verbatim commit subjects
+        assert "feat: add login flow" in prompt
+        assert "fix: handle expired token" in prompt
+        assert "refactor: simplify checkout" in prompt
+        # Per-project totals
+        assert "[auth]" in prompt
+        assert "[frontend]" in prompt
+        # SHA prefix
+        assert "abcdef01" in prompt
+        # Lines-changed totals
+        assert "147 lines changed" in prompt
+
+    def test_git_activity_section_omitted_when_empty(self):
+        from ambient.detect.git_activity import GitActivityFindings
+        data = _fully_populated_data()
+        data.git_activity = GitActivityFindings()
+        prompt = build_insights_prompt(data)
+        assert "GIT ACTIVITY" not in prompt
+
+    def test_git_activity_max_commits_per_project_capped(self):
+        """Long commit lists per project respect the caps['git_commits_per_project']."""
+        from ambient.detect.git_activity import GitActivityFindings, GitCommit
+        data = _fully_populated_data()
+        data.git_activity = GitActivityFindings(
+            by_project={"big": [
+                GitCommit(sha=f"sha{i:08d}", ts_iso=f"2026-04-{15-i:02d}T10:00:00-04:00",
+                          author="dev", subject=f"commit {i}",
+                          files_changed=1, insertions=1, deletions=0)
+                for i in range(20)
+            ]},
+            total_commits=20, total_lines_changed=20,
+        )
+        # Cap at 3 for this test
+        from ambient.present.insights import _DEFAULT_CAPS
+        caps = dict(_DEFAULT_CAPS)
+        caps["git_commits_per_project"] = 3
+        prompt = build_insights_prompt(data, caps)
+        # Only 3 commits cited verbatim
+        assert "commit 0" in prompt
+        assert "commit 2" in prompt
+        assert "commit 3" not in prompt
+        # And the truncation footer notes the rest
+        assert "and 17 more commit(s)" in prompt
+
+    def test_system_prompt_instructs_what_shipped_first(self):
+        from ambient.present.insights import INSIGHTS_SYSTEM
+        assert "What Shipped" in INSIGHTS_SYSTEM
+        assert "GIT ACTIVITY" in INSIGHTS_SYSTEM
+        # Must require the model to anchor against shipped work
+        assert "denominator" in INSIGHTS_SYSTEM.lower()
 
     def test_concrete_examples_embedded(self):
         """Prompt embeds verbatim prompts, commands, files, and first_claude_prompt strings."""

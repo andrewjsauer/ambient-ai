@@ -21,6 +21,10 @@ from ambient.detect.coaching import (
 )
 from ambient.detect.compression import CompressionFindings, detect_compression
 from ambient.detect.correlator import CorrelationFindings, correlate_signals
+from ambient.detect.git_activity import (
+    GitActivityFindings,
+    detect_git_activity,
+)
 from ambient.detect.project_capabilities import clear_capability_cache
 from ambient.detect.prompt_patterns import (
     PromptPatternFindings,
@@ -59,20 +63,22 @@ _DEFAULT_CAPS = {
     "verification_gaps": 8,
     "abandonment_examples": 3,  # per new closure_reason
     "pending_recs": 10,
+    "git_commits_per_project": 8,  # cap commits cited per project in GIT ACTIVITY
 }
 
-INSIGHTS_SYSTEM = """You are a senior engineer reviewing a developer's week of work. The data is rich (real prompts, real commands, real file paths, real chains with failure-and-resolution context, real verification gaps bucketed by project capability). Your job is to produce a tight engineering review grounded in those specifics — not behavioral coaching, not generalities, not padding.
+INSIGHTS_SYSTEM = """You are a senior engineer reviewing a developer's week of work. The data is rich (real prompts, real commands, real file paths, real chains with failure-and-resolution context, real verification gaps bucketed by project capability, and a per-project git-activity ledger of what actually shipped). Your job is to produce a tight engineering review grounded in those specifics — not behavioral coaching, not generalities, not padding.
 
 Sections to produce, in this order. Only emit a section when the input data contains a corresponding section. If the input has no data for a topic, omit that section entirely from your output. Do not write "no data" or "insufficient sample" filler.
 
-1. **Top Finding** — the single most-actionable engineering observation this week, in one paragraph. Cite at least one verbatim quote from the data (a prompt, command, or file path).
-2. **Recurring Patterns** — the most-repeated prompts and command sequences. Quote the normalized pattern text verbatim. Note which projects they appear in.
-3. **Stuck Episode Analysis** — patterns in the stuck sessions, broken out by project, by failing tool, and by file cluster. Quote tool names and file paths from the data. When the data includes opening prompts for stuck sessions, quote at least one verbatim.
-4. **Verification Gaps** — when the data includes a verification-gap section, report the per-bucket rates ("projects with tests", "projects with typecheck/build only", "projects with no detected verification target"). The "neither" bucket is descriptive, not a gap — projects with no test or typecheck target cannot be verified by definition; do not frame those sessions as the developer skipping tests. When a bucket is low-sample, hedge or omit. Cite one specific example gap (session id, file edited, project).
-5. **Resolution Velocity** — how quickly problems close. Cite avg/median/p90 and at least one example resolved chain. When abandoned chains have specific reason codes (interrupt_mid_thought, context_rot, given_up, end_of_window), narrate WHY chains aren't closing, not just that they aren't.
-6. **Trend vs. Prior Week** — only when the period-comparison section is present in the input. State the deltas in plain numbers. Never invent a trend.
-7. **Surprise of the Week** — exactly one non-obvious cross-signal observation the algorithmic detectors did NOT highlight directly. Must cross-reference two data sources (e.g., a prompt pattern AND a stuck file cluster, or a command sequence AND a correlation pattern). Cite the specific data. If no real surprise exists, omit this section entirely. Do not invent a surprise to fill space.
-8. **Diagnostic Questions** — conclude with exactly three questions a senior engineer would ask the developer after reading this report. Each question must reference a specific data point above (count, project, file, command, chain id) and be answerable in one sentence. Do not issue directives. Do not prescribe behavior changes. The goal is to force the developer's own synthesis, not to tell them what to do.
+1. **What Shipped** — when the GIT ACTIVITY section is present in the input, open the report by naming what actually shipped this window. Cite specific commit subjects and per-project commit counts. This is the denominator against which every later finding should be framed. When GIT ACTIVITY is absent (no commits in any project this window), omit this section like any other — do not write "no commits" filler.
+2. **Top Finding** — the single most-actionable engineering observation this window, in one paragraph. Cite at least one verbatim quote from the data (a prompt, command, file path, or commit). Frame it against shipped work when possible.
+3. **Recurring Patterns** — the most-repeated prompts and command sequences. Quote the normalized pattern text verbatim. Note which projects they appear in.
+4. **Stuck Episode Analysis** — patterns in the stuck sessions, broken out by project, by failing tool, and by file cluster. Quote tool names and file paths from the data. When the data includes opening prompts for stuck sessions, quote at least one verbatim.
+5. **Verification Gaps** — when the data includes a verification-gap section, report the per-bucket rates ("projects with tests", "projects with typecheck/build only", "projects with no detected verification target"). The "neither" bucket is descriptive, not a gap — projects with no test or typecheck target cannot be verified by definition; do not frame those sessions as the developer skipping tests. When a bucket is low-sample, hedge or omit. Cite one specific example gap (session id, file edited, project).
+6. **Resolution Velocity** — how quickly problems close. Cite avg/median/p90 and at least one example resolved chain. When abandoned chains have specific reason codes (interrupt_mid_thought, context_rot, given_up, end_of_window), narrate WHY chains aren't closing, not just that they aren't.
+7. **Trend vs. Prior Week** — only when the period-comparison section is present in the input. State the deltas in plain numbers. Never invent a trend.
+8. **Surprise of the Week** — exactly one non-obvious cross-signal observation the algorithmic detectors did NOT highlight directly. Must cross-reference two data sources (e.g., a prompt pattern AND a stuck file cluster, a command sequence AND a correlation pattern, or a commit AND a verification gap). Cite the specific data. If no real surprise exists, omit this section entirely. Do not invent a surprise to fill space.
+9. **Diagnostic Questions** — conclude with exactly three questions a senior engineer would ask the developer after reading this report. Each question must reference a specific data point above (count, project, file, command, chain id, or commit) and be answerable in one sentence. Do not issue directives. Do not prescribe behavior changes. The goal is to force the developer's own synthesis, not to tell them what to do.
 
 Pending recommendations, when present in the input, are surfaced in an appendix you do not need to write — the report renderer handles that separately.
 
@@ -139,6 +145,9 @@ class CoachingData:
     verification_gaps: VerificationGapFindings = field(
         default_factory=VerificationGapFindings
     )
+    # v3 Unit 3: per-project shipped-work summary from `git log`. Surfaced as
+    # the FIRST section of the prompt so every later finding has a denominator.
+    git_activity: GitActivityFindings = field(default_factory=GitActivityFindings)
 
 
 def _safe_run(fn, *args, default, label, **kwargs):
@@ -194,6 +203,11 @@ def _aggregate_window(
         default=VerificationGapFindings(),
         label="verification_gaps",
     )
+    git_activity = _safe_run(
+        detect_git_activity, events, start, end, config,
+        default=GitActivityFindings(),
+        label="git_activity",
+    )
 
     return CoachingData(
         coaching_findings=findings,
@@ -206,6 +220,7 @@ def _aggregate_window(
         compression=compression,
         correlations=correlations,
         verification_gaps=verification_gaps,
+        git_activity=git_activity,
     )
 
 
@@ -396,6 +411,38 @@ def _section_resolution_chains(data: CoachingData, caps: dict) -> list[str]:
                 f"closed by {c.closure_reason} "
                 f"({c.active_time_ms / 60000:.1f} min active){prompt}"
             )
+    return lines
+
+
+def _section_git_activity(data: CoachingData, caps: dict) -> list[str]:
+    ga = data.git_activity
+    if ga.total_commits == 0:
+        return []
+    lines = [
+        f"\nGIT ACTIVITY (what shipped this window — {ga.total_commits} "
+        f"commits across {len(ga.by_project)} project(s), "
+        f"{ga.total_lines_changed} lines changed):"
+    ]
+    cap = caps["git_commits_per_project"]
+    # Order projects by total commits descending so the most-active project
+    # leads. Within a project, commits are already newest-first.
+    ordered = sorted(
+        ga.by_project.items(),
+        key=lambda kv: len(kv[1]),
+        reverse=True,
+    )
+    for project, commits in ordered:
+        proj_lines = sum(c.insertions + c.deletions for c in commits)
+        lines.append(
+            f"  [{project}] {len(commits)} commit(s), {proj_lines} lines changed:"
+        )
+        for c in commits[:cap]:
+            lines.append(
+                f"    {c.sha[:8]} {_truncate(c.subject, 80)} "
+                f"(+{c.insertions}/-{c.deletions}, {c.files_changed} file(s))"
+            )
+        if len(commits) > cap:
+            lines.append(f"    ... and {len(commits) - cap} more commit(s)")
     return lines
 
 
@@ -653,6 +700,9 @@ def build_insights_prompt(data: CoachingData, caps: dict | None = None) -> str:
     sections: list[str] = [
         f"COACHING DATA — {data.date_range} ({data.window_days}-day window)"
     ]
+    # Git activity FIRST so every later finding has a denominator. The LLM
+    # is instructed to anchor its top finding against shipped work.
+    sections += _section_git_activity(data, caps)
     sections += _section_session_outcomes(data)
     sections += _section_recurring_prompts(data, caps)
     sections += _section_command_sequences(data, caps)
@@ -681,6 +731,14 @@ def _delta_suffix(current: float | int, delta: float | int | None, *, unit: str 
 
 def format_terminal_summary(data: CoachingData) -> str:
     lines = [f"Ambient Insights — {data.date_range}\n"]
+
+    # What shipped — anchors the rest of the summary in real work.
+    ga = data.git_activity
+    if ga.total_commits > 0:
+        lines.append(
+            f"Shipped:              {ga.total_commits} commit(s) across "
+            f"{len(ga.by_project)} project(s), {ga.total_lines_changed} lines changed"
+        )
 
     # Treat a comparison with insufficient_data_reason as no comparison at
     # all, matching _section_period_comparison's behavior. Otherwise the

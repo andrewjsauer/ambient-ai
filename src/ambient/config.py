@@ -98,7 +98,12 @@ class Config:
         "pyright",
     ])
 
-    # Stuck-loop trigger-prompt diagnostic (Unit 3)
+    # Git activity detector (v3 Unit 3): per-project commits read from
+    # `git log` for the insights window. Cap protects against pathological
+    # repos with thousands of commits in the window.
+    git_activity_max_commits: int = 50
+
+    # Stuck-loop trigger-prompt diagnostic (legacy Unit 3 from prior plan)
     coaching_vague_framing_patterns: list[str] = field(default_factory=lambda: [
         r"\bfigure out\b",
         r"\bfix (this|that|it)\b",
