@@ -498,6 +498,38 @@ class TestPhase3ReviewRegressions:
         from ambient.detect.vectors import VectorCategory
         assert "other" not in get_args(VectorCategory)
 
+    def test_session_boundary_emits_exit_stop_skipping_idle_gap(self, tmp_path):
+        # Real-data validation found: vectors silently spanned overnight idle
+        # gaps because pauses.classify() skips events with gap_ms > the
+        # configured session_boundary_ms. Result: 18-hour vectors ending in
+        # `tmux attach`. Now: any event with a session-boundary gap emits
+        # an "exit" stop at the end of the prior activity, and the cursor
+        # skips the idle gap so the gap doesn't become a ghost vector.
+        cfg = _config(tmp_path)
+        # session_boundary_ms default is 600_000 ms (10 min).
+        # Two events with a 12-hour gap between them.
+        ev1 = _command_event(WINDOW_START + 60_000, 1_000, "ls")
+        ev1_end = WINDOW_START + 60_000 + 1_000
+        gap = 12 * 60 * 60 * 1000  # 12 hours
+        ev2 = Event(
+            ts_start=ev1_end + gap,
+            ts_end=ev1_end + gap + 1_000,
+            duration_ms=1_000,
+            command="git status", exit_code=0, cwd="/repo/proj",
+            tmux_pane=None, gap_ms=gap, type="command",
+        )
+        result = detect_vectors([ev1, ev2], [], None, WINDOW_START, WINDOW_END, cfg)
+        # Must contain at least one "exit" stop (for the session boundary).
+        assert "exit" in result.count_by_stop_reason
+        # NO vector with duration approaching the gap (12h ≈ 43 200 000 ms).
+        # The longest vector should be much shorter than that — the gap was
+        # skipped as idle, not rendered as a ghost vector.
+        max_dur = max((v.duration_ms for v in result.vectors), default=0)
+        assert max_dur < gap, (
+            f"Expected no vector spanning the 12h idle gap, but max duration was "
+            f"{max_dur}ms ≈ {max_dur / 60_000:.1f}min"
+        )
+
 
 class TestPhase3InsightsSystemNumbering:
     def test_section_numbers_are_unique_and_monotonic(self):

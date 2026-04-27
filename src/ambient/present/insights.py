@@ -723,8 +723,12 @@ def _section_vectors(data: CoachingData, caps: dict) -> list[str]:
             mix_chunks.append(f"{reason} {pct:.0f}% ({count} vectors, {dur // 60_000}min)")
         lines.append("  Stop-reason mix: " + " · ".join(mix_chunks))
 
-    # Per-project top-N longest vectors.
-    by_project = top_vectors_per_project(vf, n=n_per_project)
+    # Per-project top-N longest vectors. Filter end_of_window out — those are
+    # tail artifacts (no activity since the last stop), not real stretches.
+    activity_only = VectorFindings(
+        vectors=[v for v in vf.vectors if v.stop_reason != "end_of_window"],
+    )
+    by_project = top_vectors_per_project(activity_only, n=n_per_project)
     # Sort projects by their longest vector's duration desc.
     projects_ordered = sorted(
         by_project.items(),
@@ -736,10 +740,14 @@ def _section_vectors(data: CoachingData, caps: dict) -> list[str]:
             continue
         chunks = []
         for v in vectors:
-            mins = v.duration_ms // 60_000
             time_str = f"{v.duration_ms / 60_000:.1f}min"
-            text = _truncate(v.last_command_or_prompt, 50)
-            chunks.append(f"{time_str} ({v.stop_reason}) {text}")
+            stop_label = v.stop_reason
+            if v.stop_reason == "exit":
+                stop_label = "exit (session)"
+            elif v.stop_reason == "pause" and v.pause_duration_ms:
+                stop_label = f"pause({v.pause_duration_ms / 60_000:.1f}m)"
+            text = _truncate(v.last_command_or_prompt, 50) or "(no text)"
+            chunks.append(f"{time_str} ({stop_label}) {text}")
         lines.append(f"  [{project}] longest {len(vectors)}: " + " · ".join(chunks))
     return lines
 

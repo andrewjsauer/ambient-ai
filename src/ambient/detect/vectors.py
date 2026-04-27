@@ -210,7 +210,28 @@ def _enumerate_stops(
     stops: list[StopEvent] = []
 
     # 1. Shell command + claude_session events → "enter" stop at ts_end.
+    # Plus: events that follow a session boundary (gap_ms above the configured
+    # threshold or session_boundary=True) emit an "exit" stop at the start of
+    # the gap. Without this, vectors silently span overnight idle gaps because
+    # pauses.classify() deliberately skips session-boundary gaps and never
+    # emits a PauseClassification for them. Real-data validation surfaced
+    # 18-hour 'enter' vectors ending in `tmux attach` because of this.
+    session_boundary_ms = getattr(config, "session_boundary_ms", 600_000)
     for ev in events or []:
+        # Session-boundary "exit" stop: emitted at the END of the prior
+        # activity (i.e. ev.ts_start - ev.gap_ms ≈ previous event's ts_end).
+        gap = getattr(ev, "gap_ms", None) or 0
+        is_boundary = bool(getattr(ev, "session_boundary", False)) or gap > session_boundary_ms
+        if is_boundary and gap > 0:
+            exit_ts = ev.ts_start - gap
+            if window_start_ms <= exit_ts <= window_end_ms:
+                stops.append(StopEvent(
+                    ts_ms=exit_ts,
+                    reason="exit",
+                    text="",
+                    project=_project_from_event(ev),
+                ))
+
         ts_end = ev.ts_start + max(ev.duration_ms, 0)
         if ts_end < window_start_ms or ts_end > window_end_ms:
             continue
@@ -353,7 +374,7 @@ def detect_vectors(
     last_tmux_focus: str | None = None
     last_project: str = "unknown"  # carries forward when a vector has no events
 
-    for stop in stops:
+    for i, stop in enumerate(stops):
         if stop.ts_ms < cursor_ms:
             # Stop predates cursor (shouldn't happen with the global sort, but
             # defend against future changes). Skip without rewinding.
@@ -370,10 +391,10 @@ def detect_vectors(
             e for e in sorted_events
             if cursor_ms <= e.ts_start < stop.ts_ms
         ]
-        # Project resolution: stop.project (set for command/session stops) wins;
-        # otherwise the most-frequent project among events_in_vector; otherwise
-        # carry forward last_project so empty pause-terminated vectors don't
-        # collapse to "unknown".
+        # Project resolution: stop.project (set for command/session/exit stops)
+        # wins; otherwise the most-frequent project among events_in_vector;
+        # otherwise carry forward last_project so empty pause-terminated
+        # vectors don't collapse to "unknown".
         if stop.project:
             project = stop.project
         elif events_in_vector:
@@ -402,7 +423,21 @@ def detect_vectors(
             pause_duration_ms=stop.pause_duration_ms,
             classification=cls,
         ))
-        cursor_ms = stop.ts_ms
+
+        # After an exit stop, skip the idle gap: advance the cursor past every
+        # adjacent exit stop to the next non-exit stop's ts. Without this, the
+        # idle period (overnight, weekend) would render as a ghost vector
+        # ending in the next 'enter' — not a real activity stretch.
+        if stop.reason == "exit":
+            next_active_ts = stop.ts_ms
+            for later in stops[i + 1:]:
+                if later.reason != "exit" and later.ts_ms > stop.ts_ms:
+                    next_active_ts = later.ts_ms
+                    break
+            cursor_ms = next_active_ts
+        else:
+            cursor_ms = stop.ts_ms
+
         if stop.reason == "focus_change":
             last_app_focus = stop.app_focus
             last_tmux_focus = stop.tmux_pane_focus

@@ -587,8 +587,8 @@ def cmd_vectors(config: Config, args):
     from ambient.detect.focus_events import read_focus_events
     from ambient.detect.pauses import classify
     from ambient.detect.vectors import (
+        VectorFindings,
         detect_vectors,
-        longest_vectors,
         stop_reason_summary,
         top_vectors_per_project,
     )
@@ -623,8 +623,14 @@ def cmd_vectors(config: Config, args):
         chunks.append(f"{pct:.0f}% {reason} ({count})")
     print("Stop reasons: " + ", ".join(chunks))
 
-    print(f"\nPer project (top {config.vectors_per_project} longest):")
-    by_project = top_vectors_per_project(findings, n=config.vectors_per_project)
+    # Filter end_of_window vectors out of "longest" — they're tail artifacts
+    # whose duration just reflects "no activity since the last stop", not a
+    # real activity stretch.
+    activity_only = VectorFindings(
+        vectors=[v for v in findings.vectors if v.stop_reason != "end_of_window"],
+    )
+    print(f"\nPer project (top {config.vectors_per_project} longest activity vectors):")
+    by_project = top_vectors_per_project(activity_only, n=config.vectors_per_project)
     projects_ordered = sorted(
         by_project.items(),
         key=lambda kv: kv[1][0].duration_ms if kv[1] else 0,
@@ -639,7 +645,9 @@ def cmd_vectors(config: Config, args):
             stop_label = v.stop_reason
             if v.stop_reason == "pause" and v.pause_duration_ms:
                 stop_label = f"pause({v.pause_duration_ms / 60_000:.1f}m)"
-            text = (v.last_command_or_prompt or "")[:60]
+            elif v.stop_reason == "exit":
+                stop_label = "exit (session)"
+            text = (v.last_command_or_prompt or "")[:60] or "(no text)"
             print(f"    {mins:5.1f}m  {stop_label:14s}  {text}")
 
     print(f"\nClassification: {dict(findings.count_by_classification)}")
