@@ -216,20 +216,50 @@ def _enumerate_stops(
     # pauses.classify() deliberately skips session-boundary gaps and never
     # emits a PauseClassification for them. Real-data validation surfaced
     # 18-hour 'enter' vectors ending in `tmux attach` because of this.
+    #
+    # Two subtleties from the post-validation review:
+    #
+    # * The exit stop's ts_ms (ev.ts_start - ev.gap_ms) collides EXACTLY with
+    #   the prior event's ts_end (same value), so the dedup tie-break picks
+    #   exit (priority 4) over enter (priority 1) and discards the enter
+    #   stop entirely — losing the last command's text. To preserve the
+    #   diagnostic value, the exit stop carries the prior event's text + project.
+    #
+    # * If a gap straddles the window's start (boundary outside, post-boundary
+    #   event inside), the exit_ts falls before window_start_ms and gets
+    #   filtered. We clamp it to window_start_ms so the cursor-advance logic
+    #   in the main loop can still skip the post-window prefix of the gap;
+    #   without this clamp, the first vector ghost-spans from window_start to
+    #   the first event's ts_end — the original bug, relocated to the edge.
     session_boundary_ms = getattr(config, "session_boundary_ms", 600_000)
-    for ev in events or []:
-        # Session-boundary "exit" stop: emitted at the END of the prior
-        # activity (i.e. ev.ts_start - ev.gap_ms ≈ previous event's ts_end).
+    sorted_events_by_ts = sorted(events or [], key=lambda e: e.ts_start)
+    for i, ev in enumerate(sorted_events_by_ts):
         gap = getattr(ev, "gap_ms", None) or 0
         is_boundary = bool(getattr(ev, "session_boundary", False)) or gap > session_boundary_ms
         if is_boundary and gap > 0:
             exit_ts = ev.ts_start - gap
+            # Carry the prior event's text + project so the dedup-discarded
+            # enter stop's diagnostic value isn't lost.
+            if i > 0:
+                prev = sorted_events_by_ts[i - 1]
+                exit_text = (prev.command or "") if prev.type == "command" else (
+                    (getattr(prev, "claude_prompts", None) or [None])[0] or prev.command or ""
+                )
+                exit_project = _project_from_event(prev)
+            else:
+                exit_text = ""
+                exit_project = _project_from_event(ev)
+
+            # Clamp pre-window exit_ts to window_start_ms so the boundary
+            # cursor-advance still fires for gaps straddling the window edge.
+            if exit_ts < window_start_ms:
+                exit_ts = window_start_ms
             if window_start_ms <= exit_ts <= window_end_ms:
                 stops.append(StopEvent(
                     ts_ms=exit_ts,
                     reason="exit",
-                    text="",
-                    project=_project_from_event(ev),
+                    text=exit_text,
+                    project=exit_project,
                 ))
 
         ts_end = ev.ts_start + max(ev.duration_ms, 0)
@@ -385,6 +415,17 @@ def detect_vectors(
             if stop.reason == "focus_change":
                 last_app_focus = stop.app_focus
                 last_tmux_focus = stop.tmux_pane_focus
+            elif stop.reason == "exit":
+                # Boundary at the cursor (typically window_start_ms after
+                # straddling-gap clamp). Skip the idle gap by advancing the
+                # cursor to the next non-exit stop, same as the post-vector
+                # exit branch below. Without this, the cursor stays at the
+                # boundary and the next stop creates a ghost vector spanning
+                # from window_start to the first real event.
+                for later in stops[i + 1:]:
+                    if later.reason != "exit" and later.ts_ms > stop.ts_ms:
+                        cursor_ms = later.ts_ms
+                        break
             continue
 
         events_in_vector = [

@@ -498,6 +498,67 @@ class TestPhase3ReviewRegressions:
         from ambient.detect.vectors import VectorCategory
         assert "other" not in get_args(VectorCategory)
 
+    def test_exit_stop_carries_prior_command_text(self, tmp_path):
+        # Post-validation review CORR-1: exit_ts = ev.ts_start - ev.gap_ms
+        # collides EXACTLY with the prior event's ts_end (same value). Dedup
+        # picks exit (priority 4) over enter (priority 1) and drops the
+        # enter stop. Without preserving prior text, the closing vector
+        # renders with empty last_command_or_prompt — the diagnostically
+        # important command before any boundary becomes invisible.
+        cfg = _config(tmp_path)
+        ev1 = _command_event(WINDOW_START + 60_000, 1_000, "ls /foo/specific-file")
+        ev1_end = WINDOW_START + 60_000 + 1_000
+        gap = 12 * 60 * 60 * 1000  # 12 hours
+        ev2 = Event(
+            ts_start=ev1_end + gap,
+            ts_end=ev1_end + gap + 1_000,
+            duration_ms=1_000,
+            command="git status", exit_code=0, cwd="/repo/proj",
+            tmux_pane=None, gap_ms=gap, type="command",
+        )
+        result = detect_vectors([ev1, ev2], [], None, WINDOW_START, WINDOW_END, cfg)
+        # Find the exit-terminated vector. Its text should be the prior
+        # command's text, not empty.
+        exit_vectors = [v for v in result.vectors if v.stop_reason == "exit"]
+        assert len(exit_vectors) >= 1
+        assert exit_vectors[0].last_command_or_prompt == "ls /foo/specific-file"
+
+    def test_pre_window_gap_does_not_create_ghost_first_vector(self, tmp_path):
+        # Post-validation review CORR-4: a gap that started BEFORE window_start
+        # (overnight idle into morning's first command) was previously dropped
+        # because exit_ts < window_start_ms. The cursor stayed at window_start
+        # and the first vector ghost-spanned to the first event's ts_end —
+        # the original bug, just at the window edge. The fix clamps exit_ts
+        # to window_start_ms and the cursor-advance logic handles the
+        # ts_ms == cursor_ms case.
+        cfg = _config(tmp_path)
+        # First event in the window starts 30 minutes after window_start;
+        # its gap_ms (10 hours) means the prior activity ended BEFORE
+        # window_start, deep in pre-window time.
+        post_boundary_start = WINDOW_START + 30 * 60_000  # 30 min into window
+        gap = 10 * 60 * 60 * 1000  # 10 hours, well before window_start
+        ev = Event(
+            ts_start=post_boundary_start,
+            ts_end=post_boundary_start + 1_000,
+            duration_ms=1_000,
+            command="git status", exit_code=0, cwd="/repo/proj",
+            tmux_pane=None, gap_ms=gap, type="command",
+        )
+        result = detect_vectors([ev], [], None, WINDOW_START, WINDOW_END, cfg)
+        # The first vector should NOT be a ghost spanning from window_start
+        # to the post-boundary event. The first vector should start at the
+        # post-boundary event's ts_start (cursor advanced past the clamped
+        # exit) and close at its ts_end.
+        # Specifically: no vector with duration approaching the 30-minute
+        # pre-event window-prefix.
+        first_vector_durations = [v.duration_ms for v in result.vectors]
+        # Allow small (<10s) duration vectors but reject one that spans
+        # the 30-minute pre-event prefix.
+        spanning_ghost = [d for d in first_vector_durations if 30 * 60_000 - 1_000 <= d < 30 * 60_000 + 60_000]
+        assert not spanning_ghost, (
+            f"Found a ghost vector spanning the pre-event window prefix: {spanning_ghost}"
+        )
+
     def test_session_boundary_emits_exit_stop_skipping_idle_gap(self, tmp_path):
         # Real-data validation found: vectors silently spanned overnight idle
         # gaps because pauses.classify() skips events with gap_ms > the
