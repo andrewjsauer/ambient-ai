@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ambient.config import Config
-from ambient.detect._claude_session_walk import walk_prompts
+from ambient.detect._claude_session_walk import PromptRecord, walk_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -55,21 +55,31 @@ def detect_freeform_fraction(
     config: Config,
     prior_window_start: datetime | None = None,
     prior_window_end: datetime | None = None,
+    *,
+    prompts: list[PromptRecord] | None = None,
+    prior_prompts: list[PromptRecord] | None = None,
 ) -> FreeformFraction:
-    """Compute freeform fraction for the window, plus prior-window delta if provided."""
-    floor = max(0, getattr(config, "freeform_fraction_min_prompts", 20))
+    """Compute freeform fraction for the window, plus prior-window delta if provided.
 
-    current_total, current_freeform, per_project_counts = _walk_window(
-        claude_projects_dir, window_start, window_end
-    )
+    When `prompts` (and optionally `prior_prompts`) are provided, skip the JSONL
+    walks and use the pre-materialized lists. The orchestrator walks each window
+    once and shares the result across all Phase 1 detectors.
+    """
+    floor = config.freeform_fraction_min_prompts
+
+    if prompts is None:
+        prompts = list(walk_prompts(claude_projects_dir, window_start, window_end))
+    current_total, current_freeform, per_project_counts = _count(prompts)
     overall_pct = (current_freeform / current_total) if current_total else 0.0
 
     prior_pct: float | None = None
     prior_total = 0
-    if prior_window_start is not None and prior_window_end is not None:
-        prior_total, prior_freeform, _ = _walk_window(
-            claude_projects_dir, prior_window_start, prior_window_end
+    if prior_prompts is None and prior_window_start is not None and prior_window_end is not None:
+        prior_prompts = list(
+            walk_prompts(claude_projects_dir, prior_window_start, prior_window_end)
         )
+    if prior_prompts is not None:
+        prior_total, prior_freeform, _ = _count(prior_prompts)
         if prior_total:
             prior_pct = prior_freeform / prior_total
 
@@ -99,25 +109,16 @@ class _Counts:
     freeform: int = 0
 
 
-def _walk_window(
-    claude_projects_dir: Path,
-    start: datetime,
-    end: datetime,
-) -> tuple[int, int, dict[str, _Counts]]:
-    """Return (total_prompts, freeform_prompts, per_project_counts) for a window."""
+def _count(prompts: list[PromptRecord]) -> tuple[int, int, dict[str, _Counts]]:
+    """Return (total, freeform, per_project_counts) for a pre-walked prompt list."""
     total = 0
     freeform = 0
     per_project: dict[str, _Counts] = {}
-
-    try:
-        for record in walk_prompts(claude_projects_dir, start, end):
-            counts = per_project.setdefault(record.project, _Counts())
-            counts.total += 1
-            total += 1
-            if record.slash_command is None:
-                counts.freeform += 1
-                freeform += 1
-    except Exception:  # pragma: no cover — defensive only
-        logger.warning("freeform_fraction walk failed; returning partial", exc_info=True)
-
+    for record in prompts:
+        counts = per_project.setdefault(record.project, _Counts())
+        counts.total += 1
+        total += 1
+        if record.slash_command is None:
+            counts.freeform += 1
+            freeform += 1
     return total, freeform, per_project

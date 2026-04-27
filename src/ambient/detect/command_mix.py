@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ambient.config import Config
-from ambient.detect._claude_session_walk import walk_prompts
+from ambient.detect._claude_session_walk import PromptRecord, walk_prompts
 from ambient.detect.slash_taxonomy import classify_slash_command
 
 logger = logging.getLogger(__name__)
@@ -101,25 +101,32 @@ def detect_command_mix(
     window_start: datetime,
     window_end: datetime,
     config: Config,
+    *,
+    prompts: list[PromptRecord] | None = None,
 ) -> CommandMixFindings:
-    """Compute per-project + overall command-mix counts within a window."""
-    floor = max(0, getattr(config, "command_mix_min_prompts", 10))
-    overrides = getattr(config, "slash_taxonomy_overrides", None) or None
+    """Compute per-project + overall command-mix counts within a window.
+
+    When `prompts` is provided, skip the JSONL walk and use the pre-materialized
+    list. The orchestrator (insights._aggregate_window) walks once per window
+    and shares the list across all Phase 1 detectors to avoid redundant I/O.
+    """
+    floor = config.command_mix_min_prompts
+    overrides = config.slash_taxonomy_overrides or None
+
+    if prompts is None:
+        prompts = list(walk_prompts(claude_projects_dir, window_start, window_end))
 
     raw: dict[str, ProjectMix] = {}
     overall = ProjectMix()
 
-    try:
-        for record in walk_prompts(claude_projects_dir, window_start, window_end):
-            if record.slash_command is None:
-                category = "freeform"
-            else:
-                category = classify_slash_command(record.slash_command, overrides=overrides)
-            mix = raw.setdefault(record.project, ProjectMix())
-            mix.add(category)
-            overall.add(category)
-    except Exception:  # pragma: no cover — defensive only; helper degrades silently
-        logger.warning("command_mix walk failed; returning partial results", exc_info=True)
+    for record in prompts:
+        if record.slash_command is None:
+            category = "freeform"
+        else:
+            category = classify_slash_command(record.slash_command, overrides=overrides)
+        mix = raw.setdefault(record.project, ProjectMix())
+        mix.add(category)
+        overall.add(category)
 
     per_project = {p: mix for p, mix in raw.items() if mix.total >= floor}
 

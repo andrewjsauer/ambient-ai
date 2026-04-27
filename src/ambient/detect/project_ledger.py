@@ -30,7 +30,7 @@ from typing import Literal
 
 from ambient.capture.reader import Event
 from ambient.config import Config
-from ambient.detect._claude_session_walk import walk_prompts
+from ambient.detect._claude_session_walk import PromptRecord, walk_prompts
 from ambient.detect.projects import detect_project_allocation
 
 logger = logging.getLogger(__name__)
@@ -73,6 +73,7 @@ def detect_project_ledger(
     *,
     api_client=None,
     skip_summaries: bool = False,
+    prompts: list[PromptRecord] | None = None,
 ) -> ProjectLedger:
     """Build a project ledger for the window.
 
@@ -85,11 +86,13 @@ def detect_project_ledger(
             When None, the per-project Haiku calls create a fresh client each call.
         skip_summaries: when True, populate entries but skip the Haiku call. Useful
             for tests and for cost-bounded re-runs.
+        prompts: when provided, skip the JSONL walk and use this pre-materialized
+            list. The orchestrator walks once per window across all Phase 1 detectors.
     """
-    min_active_ms = max(0, getattr(config, "project_ledger_min_active_ms", 600_000))
-    top_files_n = max(0, getattr(config, "project_ledger_top_files_n", 5))
-    max_prompts = max(0, getattr(config, "project_ledger_summary_max_prompts", 30))
-    truncate_chars = max(0, getattr(config, "project_ledger_summary_truncate_chars", 500))
+    min_active_ms = config.project_ledger_min_active_ms
+    top_files_n = config.project_ledger_top_files_n
+    max_prompts = config.project_ledger_summary_max_prompts
+    truncate_chars = config.project_ledger_summary_truncate_chars
 
     # Time + session counts: reuse projects.detect_project_allocation.
     allocations = detect_project_allocation(events, config).allocations
@@ -105,7 +108,8 @@ def detect_project_ledger(
     cwds_by_basename = _cwds_by_basename(events)
 
     prompts_by_slug = _aggregate_prompts(
-        claude_projects_dir, window_start, window_end, max_prompts, truncate_chars
+        claude_projects_dir, window_start, window_end, max_prompts, truncate_chars,
+        prompts=prompts,
     )
 
     entries: list[ProjectLedgerEntry] = []
@@ -181,10 +185,18 @@ def _aggregate_prompts(
     window_end: datetime,
     max_prompts: int,
     truncate_chars: int,
+    *,
+    prompts: list[PromptRecord] | None = None,
 ) -> dict[str, list[str]]:
-    """Per-slug prompt list, most-recent first, capped + truncated."""
+    """Per-slug prompt list, most-recent first, capped + truncated.
+
+    When `prompts` is provided, skip the JSONL walk.
+    """
+    if prompts is None:
+        prompts = list(walk_prompts(claude_projects_dir, window_start, window_end))
+
     by_slug: dict[str, list[tuple[datetime, str]]] = {}
-    for record in walk_prompts(claude_projects_dir, window_start, window_end):
+    for record in prompts:
         text = record.text
         if truncate_chars and len(text) > truncate_chars:
             text = text[:truncate_chars]

@@ -342,3 +342,62 @@ class TestByDayRendering:
         data = _empty_data(by_day=False, events=events)
         out = format_terminal_summary(data)
         assert "--by-day" not in out
+
+
+class TestWalkCoalescing:
+    """Lock in the contract that aggregate_coaching_data walks each window
+    exactly once for Phase 1 detectors, not once per detector. Regression guard
+    for the perf review's PERF-1 finding (8x walks → 2x).
+    """
+
+    def test_phase1_walks_once_per_window(self, tmp_path, monkeypatch):
+        from unittest.mock import patch
+        from ambient.config import Config
+        from ambient.present import insights as insights_mod
+
+        cfg = Config(base_dir=tmp_path / ".ambient")
+        cfg.ensure_dirs()
+        # Empty Claude projects + empty events file path
+        cfg.claude_projects_dir = tmp_path / "projects"
+        cfg.claude_projects_dir.mkdir()
+
+        call_log = []
+
+        original_walk = insights_mod._walk_prompts_for_window
+
+        def tracking_walk(projects_dir, start, end):
+            call_log.append((start.isoformat(), end.isoformat()))
+            return original_walk(projects_dir, start, end)
+
+        with patch.object(insights_mod, "_walk_prompts_for_window", tracking_walk):
+            insights_mod.aggregate_coaching_data(cfg, window_days=7, compare=True)
+
+        # Expect exactly two walks: one for prior window, one for current window.
+        # No detector should walk independently.
+        assert len(call_log) == 2, (
+            f"Expected 2 prompt walks (1 current + 1 prior), got {len(call_log)}: {call_log}"
+        )
+
+    def test_phase1_detectors_skipped_on_prior_window(self, tmp_path):
+        from unittest.mock import patch
+        from ambient.config import Config
+        from ambient.present import insights as insights_mod
+
+        cfg = Config(base_dir=tmp_path / ".ambient")
+        cfg.ensure_dirs()
+        cfg.claude_projects_dir = tmp_path / "projects"
+        cfg.claude_projects_dir.mkdir()
+
+        with patch.object(insights_mod, "detect_command_mix") as mock_cm, \
+             patch.object(insights_mod, "detect_freeform_fraction") as mock_ff, \
+             patch.object(insights_mod, "detect_project_ledger") as mock_pl:
+            mock_cm.return_value = None
+            mock_ff.return_value = None
+            mock_pl.return_value = None
+            insights_mod.aggregate_coaching_data(cfg, window_days=7, compare=True)
+
+        # Each Phase 1 detector should run exactly ONCE — for the current window.
+        # The prior aggregation must skip them (skip_phase1=True).
+        assert mock_cm.call_count == 1, f"command_mix called {mock_cm.call_count}x"
+        assert mock_ff.call_count == 1, f"freeform_fraction called {mock_ff.call_count}x"
+        assert mock_pl.call_count == 1, f"project_ledger called {mock_pl.call_count}x"

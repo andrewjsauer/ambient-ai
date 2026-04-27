@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 
 from ambient.capture.reader import read_events
 from ambient.config import Config
+from ambient.detect._claude_session_walk import PromptRecord, walk_prompts
 from ambient.detect.coaching import (
     CoachingFindings,
     StuckPatternFindings,
@@ -192,11 +193,25 @@ _COMPARISON_MIN_STUCK = 3
 
 
 def _aggregate_window(
-    config: Config, start: datetime, end: datetime, window_days: int
+    config: Config,
+    start: datetime,
+    end: datetime,
+    window_days: int,
+    *,
+    skip_phase1: bool = False,
+    prior_prompts: list[PromptRecord] | None = None,
 ) -> CoachingData:
     """Run every detector over a date window and assemble a CoachingData.
 
     Does not populate `.comparison`; the caller fills that in if applicable.
+
+    `skip_phase1=True` skips command_mix / freeform_fraction / project_ledger
+    (used for the prior window — `compute_period_comparison` never reads them,
+    so running Haiku summaries on a discarded ledger is wasted spend).
+
+    `prior_prompts` (when provided alongside `skip_phase1=False`) is the
+    materialized prompt list for the prior window so freeform_fraction can
+    compute its delta without re-walking.
     """
     date_range = f"{start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}"
     events = read_events(config, start=start, end=end)
@@ -234,26 +249,38 @@ def _aggregate_window(
         label="git_activity",
     )
 
-    # v4 Phase 1: command mix + freeform fraction read ~/.claude/projects/*.jsonl
-    # directly via the shared session walk; project ledger reuses the existing
-    # event stream for time + files. All three degrade to None on failure.
-    command_mix = _safe_run(
-        detect_command_mix, config.claude_projects_dir, start, end, config,
-        default=None,
-        label="command_mix",
-    )
-    prior_window_start = start - (end - start)
-    freeform_fraction = _safe_run(
-        detect_freeform_fraction, config.claude_projects_dir, start, end, config,
-        prior_window_start=prior_window_start, prior_window_end=start,
-        default=None,
-        label="freeform_fraction",
-    )
-    project_ledger = _safe_run(
-        detect_project_ledger, events, config.claude_projects_dir, start, end, config,
-        default=None,
-        label="project_ledger",
-    )
+    # v4 Phase 1 detectors: walk ~/.claude/projects/*.jsonl ONCE for this window
+    # and share the result across command_mix, freeform_fraction, and
+    # project_ledger. Skipped entirely on the prior window — comparison consumes
+    # only velocity/stuck/patterns from the prior call.
+    if skip_phase1:
+        command_mix = None
+        freeform_fraction = None
+        project_ledger = None
+    else:
+        prompts = _safe_run(
+            _walk_prompts_for_window, config.claude_projects_dir, start, end,
+            default=[],
+            label="phase1_walk",
+        )
+        command_mix = _safe_run(
+            detect_command_mix, config.claude_projects_dir, start, end, config,
+            prompts=prompts,
+            default=None,
+            label="command_mix",
+        )
+        freeform_fraction = _safe_run(
+            detect_freeform_fraction, config.claude_projects_dir, start, end, config,
+            prompts=prompts, prior_prompts=prior_prompts,
+            default=None,
+            label="freeform_fraction",
+        )
+        project_ledger = _safe_run(
+            detect_project_ledger, events, config.claude_projects_dir, start, end, config,
+            prompts=prompts,
+            default=None,
+            label="project_ledger",
+        )
 
     return CoachingData(
         coaching_findings=findings,
@@ -272,6 +299,13 @@ def _aggregate_window(
         project_ledger=project_ledger,
         events=events,
     )
+
+
+def _walk_prompts_for_window(
+    claude_projects_dir, start: datetime, end: datetime
+) -> list[PromptRecord]:
+    """Materialize a single prompt walk for the window. Errors propagate to _safe_run."""
+    return list(walk_prompts(claude_projects_dir, start, end))
 
 
 def compute_period_comparison(
@@ -341,14 +375,30 @@ def aggregate_coaching_data(
 
     end = datetime.now()
     start = end - timedelta(days=window_days)
-    current = _aggregate_window(config, start, end, window_days)
 
     if compare:
         # Prior window: equal length, ending where current window starts.
         prior_end = start
         prior_start = prior_end - timedelta(days=window_days)
-        prior = _aggregate_window(config, prior_start, prior_end, window_days)
+        # Materialize the prior prompt walk once; share with current's
+        # freeform_fraction so its delta computation doesn't re-walk.
+        prior_prompts = _safe_run(
+            _walk_prompts_for_window, config.claude_projects_dir, prior_start, prior_end,
+            default=[],
+            label="phase1_walk_prior",
+        )
+        # Phase 1 detectors are skipped on the prior aggregation — comparison
+        # never reads them, so running per-project Haiku summaries on a
+        # throwaway ledger would just waste spend.
+        prior = _aggregate_window(
+            config, prior_start, prior_end, window_days, skip_phase1=True
+        )
+        current = _aggregate_window(
+            config, start, end, window_days, prior_prompts=prior_prompts
+        )
         current.comparison = compute_period_comparison(current, prior, config)
+    else:
+        current = _aggregate_window(config, start, end, window_days)
 
     # Pending recommendations — staged by the daemon, surfaced here for
     # visibility in the insights report. Deferred import to avoid a cycle
