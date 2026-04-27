@@ -907,11 +907,19 @@ def _delta_suffix(current: float | int, delta: float | int | None, *, unit: str 
 def _format_by_day_summary(data: CoachingData) -> str:
     """v4 Phase 1 Unit 5: render the window as a per-day timeline.
 
-    Buckets events from `data.events` by local day, names the most-active
-    projects per day. Falls back to the aggregate render with a one-line note
-    when the window is shorter than 2 days (per-day view is meaningless for
-    ≤24h windows).
+    Buckets events from `data.events` by local calendar date, names the most-
+    active projects per day. Falls back to the aggregate render with a one-line
+    note when the window is shorter than 2 days (per-day view is meaningless
+    for ≤24h windows).
+
+    Bucketing keys on the `date` object derived from event.ts_start so windows
+    spanning a year boundary (e.g. Dec 28 → Jan 3) sort chronologically. The
+    earlier implementation used a `str.strftime("%a %b %d")` key and re-parsed
+    it with the current year, which mis-sorted year-boundary windows and would
+    have raised on Feb-29 of a non-leap year.
     """
+    from datetime import date as _date
+
     lines = [f"Ambient Insights — {data.date_range} (--by-day)\n"]
     if data.window_days < 2:
         lines.append("(window < 2 days; --by-day falls back to aggregate)")
@@ -925,20 +933,19 @@ def _format_by_day_summary(data: CoachingData) -> str:
         return "\n".join(lines)
 
     from collections import defaultdict
-    daily_ms: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    daily_ms: dict[_date, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for event in events:
         if event.duration_ms <= 0:
             continue
-        day_key = datetime.fromtimestamp(event.ts_start / 1000).strftime("%a %b %d")
+        day = datetime.fromtimestamp(event.ts_start / 1000).date()
         project = _project_label_for_event(event)
-        daily_ms[day_key][project] += event.duration_ms
+        daily_ms[day][project] += event.duration_ms
 
     if not daily_ms:
         lines.append("No qualifying events in this window.")
         return "\n".join(lines)
 
-    sorted_days = sorted(daily_ms.keys(), key=_parse_day_key)
-    for day in sorted_days:
+    for day in sorted(daily_ms.keys()):
         per_project = sorted(daily_ms[day].items(), key=lambda kv: kv[1], reverse=True)
         # Drop projects under 5 minutes from the daily line — too noisy.
         meaningful = [(p, ms) for p, ms in per_project if ms >= 5 * 60_000]
@@ -948,7 +955,8 @@ def _format_by_day_summary(data: CoachingData) -> str:
         for project, ms in meaningful:
             mins = ms // 60_000
             chunks.append(f"{project} ({mins / 60:.1f}h)" if mins >= 60 else f"{project} ({mins}min)")
-        lines.append(f"  {day}:  " + " → ".join(chunks))
+        day_label = day.strftime("%a %b %d")
+        lines.append(f"  {day_label}:  " + " → ".join(chunks))
 
     return "\n".join(lines)
 
@@ -963,14 +971,6 @@ def _project_label_for_event(event) -> str:
             return "unknown"
         return name
     return "unknown"
-
-
-def _parse_day_key(day_key: str) -> datetime:
-    """Parse a 'Mon Apr 21' string back to a datetime for sorting."""
-    try:
-        return datetime.strptime(f"{datetime.now().year} {day_key}", "%Y %a %b %d")
-    except ValueError:
-        return datetime.min
 
 
 def format_terminal_summary(data: CoachingData) -> str:

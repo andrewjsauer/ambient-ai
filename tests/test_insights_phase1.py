@@ -343,6 +343,26 @@ class TestByDayRendering:
         out = format_terminal_summary(data)
         assert "--by-day" not in out
 
+    def test_year_boundary_sorts_chronologically(self):
+        # Window spanning Dec 30 → Jan 2 must sort chronologically, not by
+        # calendar-day-of-current-year. Earlier implementation used
+        # datetime.now().year on every day, putting Dec 30 AFTER Jan 2.
+        events = [
+            _shell_event("2026-01-02T10:00:00", "/repo/p", 30 * 60_000),
+            _shell_event("2025-12-30T10:00:00", "/repo/p", 30 * 60_000),
+            _shell_event("2025-12-31T10:00:00", "/repo/p", 30 * 60_000),
+            _shell_event("2026-01-01T10:00:00", "/repo/p", 30 * 60_000),
+        ]
+        data = _empty_data(by_day=True, events=events)
+        out = format_terminal_summary(data)
+        idx_dec30 = out.find("Dec 30")
+        idx_dec31 = out.find("Dec 31")
+        idx_jan01 = out.find("Jan 01")
+        idx_jan02 = out.find("Jan 02")
+        # All four days must appear, in chronological order.
+        assert idx_dec30 != -1 and idx_dec31 != -1 and idx_jan01 != -1 and idx_jan02 != -1
+        assert idx_dec30 < idx_dec31 < idx_jan01 < idx_jan02
+
 
 class TestWalkCoalescing:
     """Lock in the contract that aggregate_coaching_data walks each window
