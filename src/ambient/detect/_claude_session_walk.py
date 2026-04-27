@@ -121,12 +121,16 @@ def _walk_one_file(
                 for text in _iter_user_text_blocks(obj):
                     if _is_tool_output_echo(text):
                         continue
+                    cleaned = _strip_appended_tag_blocks(text)
+                    if not cleaned:
+                        # Body was entirely tag-block content — skip.
+                        continue
                     yield PromptRecord(
                         ts=ts,
                         project=project,
                         session_id=session_id or path.stem,
-                        text=text,
-                        slash_command=extract_slash_command(text),
+                        text=cleaned,
+                        slash_command=extract_slash_command(cleaned),
                     )
     except OSError as e:
         logger.warning("Cannot read session file %s: %s", path, e)
@@ -154,8 +158,44 @@ def _iter_user_text_blocks(obj: dict) -> Iterator[str]:
 
 
 def _is_tool_output_echo(text: str) -> bool:
-    """Return True if `text` looks like a tool-output echo wrapped in user content."""
+    """Return True if `text` looks like a tool-output echo wrapped in user content.
+
+    Catches both whole-message echoes (`<bash-stdout>...`) and prompts whose
+    body is *entirely* a system-reminder block. Real prompts with an appended
+    reminder (e.g. "fix the bug\\n<system-reminder>...</system-reminder>") are
+    NOT echoes — they get stripped of the trailing reminder via _strip_tags.
+    """
     return text.startswith(_TOOL_OUTPUT_PREFIXES)
+
+
+_TAG_BLOCK_RE = None  # lazy-compiled below
+
+
+def _strip_appended_tag_blocks(text: str) -> str:
+    """Strip trailing <system-reminder>...</system-reminder> and similar blocks.
+
+    Claude Code injects system reminders into user-message bodies; if the user
+    typed a real prompt and a reminder was appended, the prompt should be
+    counted as freeform but the reminder should not pollute the text fed to
+    Haiku. Strip from the right; preserve everything before any trailing block.
+    """
+    import re
+    global _TAG_BLOCK_RE
+    if _TAG_BLOCK_RE is None:
+        # Match a trailing block: <tag>...</tag> at the end of the string,
+        # possibly preceded by whitespace. Tag names limited to known noise.
+        _TAG_BLOCK_RE = re.compile(
+            r"\s*<(system-reminder|local-command-stdout|local-command-stderr|bash-stdout|bash-stderr|tool_use_error)>"
+            r".*?</\1>\s*$",
+            re.DOTALL,
+        )
+    stripped = text
+    # Repeat until no trailing tag block remains (multiple appended blocks possible).
+    while True:
+        new = _TAG_BLOCK_RE.sub("", stripped).rstrip()
+        if new == stripped:
+            return stripped
+        stripped = new
 
 
 def _parse_ts(raw: object) -> datetime | None:

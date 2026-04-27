@@ -128,6 +128,27 @@ class TestWalkPrompts:
         recs = list(walk_prompts(root, WINDOW_START, WINDOW_END))
         assert [r.text for r in recs] == ["real prompt"]
 
+    def test_strips_appended_system_reminder_from_real_prompt(self, tmp_path):
+        # Real prompts with an appended <system-reminder> block must keep the
+        # human-typed text and drop the trailing reminder. Earlier filter only
+        # caught body-starts-with prefixes and let appended blocks pollute the
+        # text fed downstream to Haiku.
+        body = "fix the bug in tick.py\n<system-reminder>do this carefully</system-reminder>"
+        root = _make_projects_dir(tmp_path, {"proj-a": [_user_line(T_INSIDE, body)]})
+        recs = list(walk_prompts(root, WINDOW_START, WINDOW_END))
+        assert len(recs) == 1
+        assert recs[0].text == "fix the bug in tick.py"
+
+    def test_strips_multiple_appended_blocks(self, tmp_path):
+        body = (
+            "real prompt\n"
+            "<system-reminder>one</system-reminder>\n"
+            "<bash-stdout>two</bash-stdout>"
+        )
+        root = _make_projects_dir(tmp_path, {"proj-a": [_user_line(T_INSIDE, body)]})
+        recs = list(walk_prompts(root, WINDOW_START, WINDOW_END))
+        assert recs[0].text == "real prompt"
+
     def test_handles_content_block_list(self, tmp_path):
         root = _make_projects_dir(tmp_path, {
             "proj-a": [
