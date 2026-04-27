@@ -573,6 +573,78 @@ def cmd_tmux_focus_disable(config: Config, args):
     print("tmux focus hooks removed (Ambient-managed only).")
 
 
+def cmd_vectors(config: Config, args):
+    """v4 Phase 3 diagnostic: print VectorFindings as a table.
+
+    Used to validate the heuristic classifier and stop-event enumerator
+    against real data before the deeper LLM-narrative description in the
+    weekly report fully lands. Works whether or not focus capture is on —
+    focus_change stops simply don't appear in the summary if no focus events
+    are on disk.
+    """
+    from datetime import datetime, timedelta
+    from ambient.capture.reader import read_events
+    from ambient.detect.focus_events import read_focus_events
+    from ambient.detect.pauses import classify
+    from ambient.detect.vectors import (
+        detect_vectors,
+        longest_vectors,
+        stop_reason_summary,
+        top_vectors_per_project,
+    )
+
+    window = args.window if hasattr(args, "window") and args.window else 7
+    end = datetime.now()
+    start = end - timedelta(days=window)
+    window_start_ms = int(start.timestamp() * 1000)
+    window_end_ms = int(end.timestamp() * 1000)
+
+    events = read_events(config, start=start, end=end)
+    focus_events = read_focus_events(
+        config.focus_events_path, since_iso=start.isoformat(),
+    )
+    pause_findings = classify(events, config)
+    pauses = pause_findings if pause_findings.available else None
+
+    findings = detect_vectors(
+        events, focus_events, pauses, window_start_ms, window_end_ms, config,
+    )
+
+    print(f"Vectors in last {window} days: {len(findings.vectors)}")
+    if not findings.vectors:
+        print("  (no vectors — try running for longer or enabling focus capture)")
+        return
+
+    summary = stop_reason_summary(findings)
+    total_dur = sum(d for _, _, d in summary) or 1
+    chunks = []
+    for reason, count, dur in summary:
+        pct = dur / total_dur * 100
+        chunks.append(f"{pct:.0f}% {reason} ({count})")
+    print("Stop reasons: " + ", ".join(chunks))
+
+    print(f"\nPer project (top {config.vectors_per_project} longest):")
+    by_project = top_vectors_per_project(findings, n=config.vectors_per_project)
+    projects_ordered = sorted(
+        by_project.items(),
+        key=lambda kv: kv[1][0].duration_ms if kv[1] else 0,
+        reverse=True,
+    )
+    for project, vectors in projects_ordered:
+        total_min = sum(v.duration_ms for v in findings.vectors if v.project == project) // 60_000
+        proj_count = findings.count_by_project.get(project, 0)
+        print(f"  {project} ({total_min}min, {proj_count} vectors)")
+        for v in vectors:
+            mins = v.duration_ms / 60_000
+            stop_label = v.stop_reason
+            if v.stop_reason == "pause" and v.pause_duration_ms:
+                stop_label = f"pause({v.pause_duration_ms / 60_000:.1f}m)"
+            text = (v.last_command_or_prompt or "")[:60]
+            print(f"    {mins:5.1f}m  {stop_label:14s}  {text}")
+
+    print(f"\nClassification: {dict(findings.count_by_classification)}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="ambient",
@@ -639,6 +711,13 @@ def main():
     )
     subparsers.add_parser("tmux-focus-disable", help="Remove tmux focus hooks")
 
+    # v4 Phase 3: vector aggregation diagnostic CLI.
+    vectors_parser = subparsers.add_parser(
+        "vectors",
+        help="Show vector aggregation table for the last N days (diagnostic)",
+    )
+    vectors_parser.add_argument("--window", type=int, help="Window in days (default: 7)")
+
     args = parser.parse_args()
     config = Config()
 
@@ -665,6 +744,7 @@ def main():
         "focus-listener-run": cmd_focus_listener_run,
         "tmux-focus-enable": cmd_tmux_focus_enable,
         "tmux-focus-disable": cmd_tmux_focus_disable,
+        "vectors": cmd_vectors,
     }
 
     if args.command in commands:

@@ -138,6 +138,19 @@ class Config:
     project_ledger_summary_max_prompts: int = 30
     project_ledger_summary_truncate_chars: int = 500
 
+    # v4 Phase 3: vector-aggregation detector tunables.
+    # Pause label threshold for emitting a pause stop event (the GMM classifier
+    # produces labels like "routine", "evaluating", "stuck"). Anything ≥ this
+    # label in severity counts as a stop. "evaluating" is the conservative
+    # default; calibrate against real data.
+    vector_pause_min_label: str = "evaluating"
+    # Drop a focus-change stop event if the previous focus-change was within
+    # this many ms (alt-tab through 5 apps in 1s collapses to one stop).
+    vector_focus_debounce_ms: int = 2000
+    # Renderer caps: top-N longest vectors per project, top-N overall.
+    vectors_per_project: int = 3
+    longest_vectors_overall: int = 5
+
     # Slash-command taxonomy: per-user reclassification of custom commands.
     # Maps "/command" → category ("planning"|"execution"|"review"|"design"|"meta"|"other").
     # Built-in classifications cover the validated set from the inventory;

@@ -32,6 +32,13 @@ from ambient.detect.freeform_fraction import (
     FreeformFraction,
     detect_freeform_fraction,
 )
+from ambient.detect.vectors import (
+    VectorFindings,
+    detect_vectors,
+    longest_vectors,
+    stop_reason_summary,
+    top_vectors_per_project,
+)
 from ambient.detect.git_activity import (
     GitActivityFindings,
     detect_git_activity,
@@ -76,6 +83,7 @@ _DEFAULT_CAPS = {
     "abandonment_examples": 3,  # per new closure_reason
     "pending_recs": 10,
     "git_commits_per_project": 8,  # cap commits cited per project in GIT ACTIVITY
+    "vectors_per_project": 3,  # v4 Phase 3: longest-N vectors per project in VECTORS
 }
 
 INSIGHTS_SYSTEM = """You are a senior engineer reviewing a developer's week of work. The data is rich (real prompts, real commands, real file paths, real chains with failure-and-resolution context, real verification gaps bucketed by project capability, and a per-project git-activity ledger of what actually shipped). Your job is to produce a tight engineering review grounded in those specifics — not behavioral coaching, not generalities, not padding.
@@ -85,6 +93,7 @@ Sections to produce, in this order. Only emit a section when the input data cont
 1. **What Shipped** — when the GIT ACTIVITY section is present in the input, open the report by naming what actually shipped this window. Cite specific commit subjects and per-project commit counts. This is the denominator against which every later finding should be framed. When GIT ACTIVITY is absent (no commits in any project this window), omit this section like any other — do not write "no commits" filler.
 2. **What You Worked On** — when the PROJECT LEDGER section is present, name the top projects by active time. For each, cite the active time, top files touched, and the one-line summary verbatim. Quote the user's distinctive wording from the recent prompts where it appears in the summary. Do not invent specifics not present in the input. When PROJECT LEDGER is absent, omit this section.
 3. **Command Mix** — when the COMMAND MIX section is present, report the planning/execution/review ratios per project. Frame as signal, not prescription: a high freeform fraction means most work bypasses structured commands, which is a fact about how the developer works, not a problem to fix. When COMMAND MIX is absent, omit this section.
+4. **Vectors** — when the VECTORS section is present, name the longest 1-3 vectors by duration and the dominant stop reason. Describe what the data says (e.g. "longest vector ended in /clear, suggesting context-rot"); do NOT invent hypotheses about vector content the data does not support. When VECTORS is absent, omit this section.
 4. **Top Finding** — the single most-actionable engineering observation this window, in one paragraph. Cite at least one verbatim quote from the data (a prompt, command, file path, or commit). Frame it against shipped work when possible.
 5. **Recurring Patterns** — the most-repeated prompts and command sequences. Quote the normalized pattern text verbatim. Note which projects they appear in.
 6. **Stuck Episode Analysis** — patterns in the stuck sessions, broken out by project, by failing tool, and by file cluster. Quote tool names and file paths from the data. When the data includes opening prompts for stuck sessions, quote at least one verbatim.
@@ -183,6 +192,10 @@ class CoachingData:
     # Maps Claude session_id → density. None when focus capture is off; empty
     # dict when capture is on but no events fell inside any session window.
     focus_density: dict[str, float] | None = None
+    # v4 Phase 3: vector aggregation findings — stretches of activity terminated
+    # by stop events (Enter, pause, focus_change, exit, end_of_window). None
+    # when the detector was skipped or failed; renderer omits the section.
+    vectors: VectorFindings | None = None
 
 
 def _safe_run(fn, *args, default, label, **kwargs):
@@ -266,6 +279,7 @@ def _aggregate_window(
         command_mix = None
         freeform_fraction = None
         project_ledger = None
+        vector_findings = None
     else:
         prompts = _safe_run(
             _walk_prompts_for_window, config.claude_projects_dir, start, end,
@@ -313,6 +327,23 @@ def _aggregate_window(
             label="project_ledger",
         )
 
+        # v4 Phase 3: vector aggregation. Re-shapes existing signals into the
+        # stop-point model. No new capture; reads events + focus_events + (if
+        # available) the GMM pause classifier. Detector failures degrade to None.
+        pauses = _safe_run(
+            _detect_pauses_safe, events, config,
+            default=None,
+            label="vectors_pauses",
+        )
+        window_start_ms = int(start.timestamp() * 1000)
+        window_end_ms = int(end.timestamp() * 1000)
+        vector_findings = _safe_run(
+            detect_vectors, events, focus_events, pauses,
+            window_start_ms, window_end_ms, config,
+            default=None,
+            label="vectors",
+        )
+
     return CoachingData(
         coaching_findings=findings,
         stuck_patterns=stuck,
@@ -330,6 +361,7 @@ def _aggregate_window(
         project_ledger=project_ledger,
         events=events,
         focus_density=focus_density if not skip_phase1 else None,
+        vectors=vector_findings if not skip_phase1 else None,
     )
 
 
@@ -338,6 +370,18 @@ def _walk_prompts_for_window(
 ) -> list[PromptRecord]:
     """Materialize a single prompt walk for the window. Errors propagate to _safe_run."""
     return list(walk_prompts(claude_projects_dir, start, end))
+
+
+def _detect_pauses_safe(events, config):
+    """Run pause classification for vectors; returns None when unavailable.
+
+    The pause classifier is calibrated lazily; its findings.available flag tells
+    us whether the model has been fit. We treat any unavailability as 'no pause
+    stops' rather than crashing the vector detector.
+    """
+    from ambient.detect.pauses import classify
+    findings = classify(events, config)
+    return findings if findings.available else None
 
 
 def _compute_focus_density(focus_events, events) -> dict[str, float]:
@@ -652,6 +696,55 @@ def _section_command_mix(data: CoachingData, caps: dict) -> list[str]:
     return lines
 
 
+def _section_vectors(data: CoachingData, caps: dict) -> list[str]:
+    """v4 Phase 3: render the longest vectors per project + stop-reason mix.
+
+    Empty when vectors is None or no vectors. Per Phase 3 → Phase 4 gate, the
+    deeper LLM-narrative description in INSIGHTS_SYSTEM is intentionally
+    minimal in this first cut — the user must judge the section useful on a
+    real weekly run before the wider framing lands.
+    """
+    vf = data.vectors
+    if vf is None or not vf.vectors:
+        return []
+    n_per_project = caps.get("vectors_per_project", 3)
+
+    lines = [
+        f"\nVECTORS ({len(vf.vectors)} stretches of activity terminated by stop events):"
+    ]
+
+    # Stop-reason mix line.
+    summary = stop_reason_summary(vf)
+    total_count = sum(c for _, c, _ in summary)
+    total_dur = sum(d for _, _, d in summary)
+    if total_count > 0 and total_dur > 0:
+        mix_chunks = []
+        for reason, count, dur in summary:
+            pct = dur / total_dur * 100 if total_dur else 0
+            mix_chunks.append(f"{reason} {pct:.0f}% ({count} vectors, {dur // 60_000}min)")
+        lines.append("  Stop-reason mix: " + " · ".join(mix_chunks))
+
+    # Per-project top-N longest vectors.
+    by_project = top_vectors_per_project(vf, n=n_per_project)
+    # Sort projects by their longest vector's duration desc.
+    projects_ordered = sorted(
+        by_project.items(),
+        key=lambda kv: kv[1][0].duration_ms if kv[1] else 0,
+        reverse=True,
+    )
+    for project, vectors in projects_ordered:
+        if not vectors:
+            continue
+        chunks = []
+        for v in vectors:
+            mins = v.duration_ms // 60_000
+            time_str = f"{v.duration_ms / 60_000:.1f}min"
+            text = _truncate(v.last_command_or_prompt, 50)
+            chunks.append(f"{time_str} ({v.stop_reason}) {text}")
+        lines.append(f"  [{project}] longest {len(vectors)}: " + " · ".join(chunks))
+    return lines
+
+
 def _section_freeform_fraction(data: CoachingData, caps: dict) -> list[str]:
     """v4 Phase 1 Unit 5: render % of prompts with no slash command + delta."""
     ff = data.freeform_fraction
@@ -950,6 +1043,9 @@ def build_insights_prompt(data: CoachingData, caps: dict | None = None) -> str:
     sections += _section_project_ledger(data, caps)
     sections += _section_command_mix(data, caps)
     sections += _section_freeform_fraction(data, caps)
+    # v4 Phase 3: vector aggregation. Empty until focus capture is on long
+    # enough to produce real stop events; renderer omits cleanly when so.
+    sections += _section_vectors(data, caps)
     sections += _section_session_outcomes(data)
     sections += _section_recurring_prompts(data, caps)
     sections += _section_command_sequences(data, caps)
