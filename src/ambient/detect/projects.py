@@ -65,13 +65,16 @@ def detect_project_allocation(
     When None (or empty), behavior is unchanged: total_ms is the gap-based
     sum of event.duration_ms, and time_basis stays "command_span".
     """
-    if not events:
-        basis: TimeBasis = (
-            "attention_weighted" if attention_intervals is not None else "command_span"
-        )
-        return ProjectFindings(time_basis=basis)
+    # Single source of truth for "are we in attention-weighted mode?" — used
+    # below for both the no-events branch and the per-event clipping. A None
+    # passthrough keeps behavior identical to Phase 1; an empty-list passthrough
+    # explicitly opts in to attention mode (zero overlap → zero ms).
+    use_attention = attention_intervals is not None
 
-    use_attention = bool(attention_intervals)
+    if not events:
+        return ProjectFindings(
+            time_basis="attention_weighted" if use_attention else "command_span",
+        )
     intervals_ms: list[tuple[int, int]] = []
     if use_attention:
         intervals_ms = _intervals_to_epoch_ms(attention_intervals or [])

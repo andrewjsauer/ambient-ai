@@ -86,6 +86,45 @@ class TestReadFocusEvents:
         assert len(events) == 1
         assert events[0].event == "b"
 
+    def test_naive_since_iso_does_not_silently_drop_events(self, tmp_path):
+        # P0 regression: insights.py passes datetime.now().isoformat() (naive)
+        # as since_iso. The events are written with UTC-aware ts. Without
+        # tz-normalization in read_focus_events, the comparison raised
+        # TypeError → swallowed by _safe_run → returned [] every time.
+        path = tmp_path / "events.jsonl"
+        path.write_text(
+            '{"ts":"2026-04-27T10:00:00+00:00","source":"nsworkspace","event":"old","bundle_id":"x"}\n'
+            '{"ts":"2026-04-27T15:00:00+00:00","source":"nsworkspace","event":"new","bundle_id":"x"}\n'
+        )
+        # Naive bound (no tz suffix) — what insights.py would pass.
+        events = read_focus_events(path, since_iso="2026-04-27T12:00:00")
+        # Filter still applied: only the second event survives.
+        assert [e.event for e in events] == ["new"]
+
+
+class TestCursorPoisoning:
+    def test_future_event_clamps_cursor_to_now(self):
+        # Adversarial finding adv-3: a single future-dated event would latch
+        # the cursor to year 9999, silently filtering all future focus events
+        # forever. Defense: clamp to now when max(events) > now+1h.
+        far_future = _ts("9999-01-01T00:00:00Z")
+        events = [
+            FocusEvent(ts=_ts("2026-04-27T10:00:00Z"), source="x", event="y"),
+            FocusEvent(ts=far_future, source="x", event="poison"),
+        ]
+        cursor = latest_cursor(events)
+        assert "9999" not in cursor
+
+    def test_normal_future_under_horizon_still_used(self):
+        # Events within the 1-hour clock-skew horizon are NOT clamped — they
+        # represent normal NTP drift, not poisoning.
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        slightly_future = _dt.now(_tz.utc) + _td(minutes=5)
+        events = [FocusEvent(ts=slightly_future, source="x", event="y")]
+        cursor = latest_cursor(events)
+        # Cursor reflects the slightly-future event, not a clamp.
+        assert "9999" not in cursor
+
 
 class TestLatestCursor:
     def test_empty_returns_empty_string(self):
@@ -220,14 +259,25 @@ class TestAttentionWeightedAllocation:
         assert findings.allocations[0].total_ms == 60_000
 
     def test_empty_intervals_marks_attention_weighted(self, tmp_path):
+        # Phase 2 review fix: empty list means "attention mode is active, just
+        # zero overlap so far". The earlier behavior silently fell back to
+        # command_span — surprising for callers who explicitly opted in.
+        # None still falls back to command_span; only [] (an explicit empty
+        # interval list) flips the basis.
         cfg = Config(base_dir=tmp_path / ".ambient")
         cfg.ensure_dirs()
         events = [_shell_event(0, "/repo/proj", 60_000)]
         findings = detect_project_allocation(events, cfg, attention_intervals=[])
-        # Empty list still indicates attention mode is active; no overlap → 0 ms.
-        # But our code treats `not attention_intervals` as no-op, so result is
-        # command-span. Document this contract: explicit None vs empty list.
+        assert findings.time_basis == "attention_weighted"
+        assert findings.allocations[0].total_ms == 0  # no overlap → zero contribution
+
+    def test_none_intervals_keeps_command_span(self, tmp_path):
+        cfg = Config(base_dir=tmp_path / ".ambient")
+        cfg.ensure_dirs()
+        events = [_shell_event(0, "/repo/proj", 60_000)]
+        findings = detect_project_allocation(events, cfg, attention_intervals=None)
         assert findings.time_basis == "command_span"
+        assert findings.allocations[0].total_ms == 60_000
 
     def test_full_overlap_yields_full_duration(self, tmp_path):
         cfg = Config(base_dir=tmp_path / ".ambient")

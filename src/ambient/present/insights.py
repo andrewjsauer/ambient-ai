@@ -179,6 +179,10 @@ class CoachingData:
     # not yet populated (e.g. test fixtures); the by-day renderer treats None
     # the same as an empty list.
     events: list | None = None
+    # v4 Phase 2 Unit 9: per-session focus-event density (switches per minute).
+    # Maps Claude session_id → density. None when focus capture is off; empty
+    # dict when capture is on but no events fell inside any session window.
+    focus_density: dict[str, float] | None = None
 
 
 def _safe_run(fn, *args, default, label, **kwargs):
@@ -270,10 +274,14 @@ def _aggregate_window(
         )
         # v4 Phase 2 Unit 9: read focus events for the window. When focus
         # capture is on, attention_intervals flips project_ledger time math
-        # from "command_span" to "attention_weighted" and gives the coaching
-        # layer a context-switch-density dimension. When focus capture is off
+        # from "command_span" to "attention_weighted" and feeds context-
+        # switch density into the coaching layer. When focus capture is off
         # (default), focus_events is empty and attention_intervals is None,
         # so behavior is identical to Phase 1.
+        #
+        # `start` from `aggregate_coaching_data` is naive local time;
+        # `read_focus_events` normalizes naive bounds to UTC for the
+        # comparison against UTC-aware event timestamps.
         focus_events = _safe_run(
             read_focus_events, config.focus_events_path,
             since_iso=start.isoformat(),
@@ -284,6 +292,7 @@ def _aggregate_window(
             compute_attention_intervals(focus_events, fallback_until=end)
             if focus_events else None
         )
+        focus_density = _compute_focus_density(focus_events, events) if focus_events else None
 
         command_mix = _safe_run(
             detect_command_mix, config.claude_projects_dir, start, end, config,
@@ -320,6 +329,7 @@ def _aggregate_window(
         freeform_fraction=freeform_fraction,
         project_ledger=project_ledger,
         events=events,
+        focus_density=focus_density if not skip_phase1 else None,
     )
 
 
@@ -328,6 +338,29 @@ def _walk_prompts_for_window(
 ) -> list[PromptRecord]:
     """Materialize a single prompt walk for the window. Errors propagate to _safe_run."""
     return list(walk_prompts(claude_projects_dir, start, end))
+
+
+def _compute_focus_density(focus_events, events) -> dict[str, float]:
+    """Build session-id → switches-per-minute density from focus events + events.
+
+    Session intervals are derived from claude_session events: each event's
+    `claude_session_id`, ts_start, and duration_ms become a (session_id, start, end)
+    tuple. Shell events have no session concept and are excluded.
+    """
+    from datetime import timezone as _tz
+    intervals = []
+    for ev in events or []:
+        if ev.type != "claude_session":
+            continue
+        session_id = getattr(ev, "claude_session_id", None)
+        if not session_id:
+            continue
+        start_dt = datetime.fromtimestamp(ev.ts_start / 1000, tz=_tz.utc)
+        end_dt = datetime.fromtimestamp(
+            (ev.ts_start + max(ev.duration_ms, 0)) / 1000, tz=_tz.utc,
+        )
+        intervals.append((session_id, start_dt, end_dt))
+    return compute_context_switch_density(focus_events, intervals)
 
 
 def compute_period_comparison(
@@ -653,6 +686,23 @@ def _section_session_outcomes(data: CoachingData) -> list[str]:
         lines.append(f"  Average thrash score: {avg_thrash:.2f}")
     elif data.coaching_findings.low_sample:
         lines.append("  Average thrash score: insufficient sample")
+
+    # v4 Phase 2 Unit 9: context-switch density per outcome class. Only emit
+    # when focus capture is on AND at least one session had focus events.
+    if data.focus_density:
+        density_by_class: dict[str, list[float]] = {}
+        for outcome in data.coaching_findings.outcomes:
+            d = data.focus_density.get(outcome.session_id)
+            if d is None:
+                continue
+            density_by_class.setdefault(outcome.classification, []).append(d)
+        if density_by_class:
+            lines.append("  Context-switch density (focus events/min):")
+            for cls in ("productive", "friction", "quick", "abandoned"):
+                xs = density_by_class.get(cls, [])
+                if xs:
+                    avg = sum(xs) / len(xs)
+                    lines.append(f"    {cls}: {avg:.1f}/min (n={len(xs)})")
     return lines
 
 

@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -74,15 +74,24 @@ def read_focus_events(
 
     Returns [] when the file is missing, empty, or unreadable. Malformed lines
     are skipped with a debug log.
+
+    The since_iso bound is normalized: naive datetimes are treated as UTC so
+    the comparison against UTC-aware event timestamps succeeds. Without this
+    normalization, the comparison raises TypeError, gets swallowed by the
+    caller's _safe_run, and the entire focus-events pipeline silently no-ops.
     """
     if not path.exists():
         return []
     since: datetime | None = None
     if since_iso:
         try:
-            since = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
         except (TypeError, ValueError):
-            since = None
+            parsed = None
+        if parsed is not None:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            since = parsed
 
     events: list[FocusEvent] = []
     try:
@@ -123,10 +132,25 @@ def latest_cursor(events: list[FocusEvent]) -> str:
 
     Empty input returns the empty string so the caller can leave the cursor
     untouched on no-op ticks.
+
+    Clock-skew defense: if the latest event ts is more than one hour in the
+    future (clock skew, NTP step, manual file edit), clamp the cursor to
+    `now`. Without this, a single bad timestamp would latch the cursor to
+    year 9999 and silently filter every subsequent focus event forever —
+    recovery would require hand-editing state.json.
     """
     if not events:
         return ""
-    return max(e.ts for e in events).isoformat()
+    max_ts = max(e.ts for e in events)
+    horizon = datetime.now(timezone.utc) + timedelta(hours=1)
+    if max_ts > horizon:
+        logger.warning(
+            "focus_events: latest event ts %s is far in the future; "
+            "clamping cursor to now to avoid poisoning",
+            max_ts.isoformat(),
+        )
+        return datetime.now(timezone.utc).isoformat()
+    return max_ts.isoformat()
 
 
 def compute_context_switch_density(
@@ -180,6 +204,11 @@ def compute_attention_intervals(
     """
     bundle_set = frozenset(terminal_bundle_ids) if terminal_bundle_ids else DEFAULT_TERMINAL_BUNDLE_IDS
 
+    # Normalize fallback_until to UTC-aware so comparisons against event
+    # timestamps (always UTC-aware) don't raise TypeError.
+    if fallback_until is not None and fallback_until.tzinfo is None:
+        fallback_until = fallback_until.replace(tzinfo=timezone.utc)
+
     intervals: list[tuple[datetime, datetime]] = []
     open_start: datetime | None = None
 
@@ -189,7 +218,13 @@ def compute_attention_intervals(
     )
 
     for e in nsw_events:
-        is_terminal = e.bundle_id in bundle_set if e.bundle_id else False
+        # Skip events with no bundle_id when deciding terminal-status. An
+        # nsworkspace activation without a bundle_id is too ambiguous to
+        # treat as "left the terminal" (would falsely close intervals on
+        # unsigned helper apps with bundle_id=None).
+        if e.bundle_id is None:
+            continue
+        is_terminal = e.bundle_id in bundle_set
         if is_terminal and open_start is None:
             open_start = e.ts
         elif not is_terminal and open_start is not None:
