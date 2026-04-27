@@ -295,6 +295,10 @@ Approximate daily costs with normal usage:
 - `joblib` -- model persistence
 - `python-dotenv` -- API key loading
 
+## Privacy
+
+ambient-ai captures and processes sensitive personal data — command history, file paths, prompt text, focus events. The privacy contract is `docs/PRIVACY.md`. Every new capture unit must verify against specific clauses by number; some signal classes (raw keystrokes, clipboard contents, full URL history, system-wide event taps) are permanently closed under the policy.
+
 ## License
 
 Private repository.
