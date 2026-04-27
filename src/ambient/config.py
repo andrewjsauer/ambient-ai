@@ -150,6 +150,15 @@ class Config:
     claude_history_path: Path = field(default=None)
     claude_projects_dir: Path = field(default=None)
 
+    # v4 Phase 2 Unit 7: NSWorkspace focus listener (separate launchd agent).
+    # Off by default (cites docs/PRIVACY.md clause 6 — opt-in per signal class).
+    # When enabled, app-activation events go to focus_events_path; the listener
+    # daemon's stdout/stderr go to focus_listener_log_path.
+    focus_capture_enabled: bool = False
+    focus_events_path: Path = field(default=None)
+    focus_listener_log_path: Path = field(default=None)
+    focus_listener_lock_path: Path = field(default=None)
+
     def __post_init__(self):
         if self.logs_dir is None:
             self.logs_dir = self.base_dir / "logs"
@@ -163,6 +172,12 @@ class Config:
             self.claude_history_path = Path.home() / ".claude" / "history.jsonl"
         if self.claude_projects_dir is None:
             self.claude_projects_dir = Path.home() / ".claude" / "projects"
+        if self.focus_events_path is None:
+            self.focus_events_path = self.base_dir / "focus-events.jsonl"
+        if self.focus_listener_log_path is None:
+            self.focus_listener_log_path = self.base_dir / "focus-listener.log"
+        if self.focus_listener_lock_path is None:
+            self.focus_listener_lock_path = self.daemon_dir / "focus-listener.lock"
 
     def ensure_dirs(self):
         self.logs_dir.mkdir(parents=True, exist_ok=True)

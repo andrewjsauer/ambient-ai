@@ -477,6 +477,71 @@ def cmd_daemon_status(config: Config, args):
         print("Events today: 0")
 
 
+def cmd_focus_enable(config: Config, args):
+    """Opt-in: install the NSWorkspace focus listener launchd agent."""
+    from ambient.daemon.launchd import (
+        install_focus_listener,
+        is_focus_listener_loaded,
+    )
+
+    config.ensure_dirs()
+    config.daemon_dir.mkdir(parents=True, exist_ok=True)
+
+    if is_focus_listener_loaded():
+        print("Focus listener already running. Use 'ambient focus-disable' first to restart.")
+        return
+
+    install_focus_listener(config)
+    print("Focus listener enabled.")
+    print(f"  Capturing app-activation events (NSWorkspace) to:")
+    print(f"    {config.focus_events_path}")
+    print(f"  Listener log: {config.focus_listener_log_path}")
+    print(f"  Privacy contract: docs/PRIVACY.md (clauses 6, 7)")
+    print(f"  Captured fields: bundle_id, app_name (localized), pid, ts")
+    print(f"  NEVER captured: window title, document path, or any closed-doors field")
+    print(f"\nTo stop: ambient focus-disable")
+
+
+def cmd_focus_disable(config: Config, args):
+    from ambient.daemon.launchd import (
+        is_focus_listener_loaded,
+        uninstall_focus_listener,
+    )
+
+    if not is_focus_listener_loaded():
+        print("Focus listener is not running.")
+        return
+
+    uninstall_focus_listener()
+    print("Focus listener stopped.")
+
+
+def cmd_focus_status(config: Config, args):
+    from ambient.daemon.launchd import is_focus_listener_loaded
+    from ambient.daemon.lock import is_locked
+
+    loaded = is_focus_listener_loaded()
+    print(f"Focus listener: {'running' if loaded else 'not running'}")
+
+    locked, info = is_locked(config.focus_listener_lock_path)
+    if locked:
+        print(f"Lock: held by PID {info.get('pid', '?')} ({info.get('age_minutes', 0):.0f}m)")
+    else:
+        print("Lock: free")
+
+    if config.focus_events_path.exists():
+        lines = sum(1 for line in open(config.focus_events_path) if line.strip())
+        print(f"Focus events captured: {lines}")
+    else:
+        print("Focus events captured: 0 (no file yet)")
+
+
+def cmd_focus_listener_run(config: Config, args):
+    """Hidden launchd entry point. Runs the focus listener until SIGTERM."""
+    from ambient.daemon.focus_listener import run
+    sys.exit(run(config))
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="ambient",
@@ -523,6 +588,18 @@ def main():
     subparsers.add_parser("daemon-stop", help="Stop the background analysis daemon")
     subparsers.add_parser("daemon-status", help="Show daemon status")
 
+    # v4 Phase 2 Unit 7: focus listener (NSWorkspace app-activation capture).
+    # Opt-in. See docs/PRIVACY.md before enabling.
+    subparsers.add_parser(
+        "focus-enable",
+        help="Enable the NSWorkspace focus listener (opt-in capture; see docs/PRIVACY.md)",
+    )
+    subparsers.add_parser("focus-disable", help="Disable the NSWorkspace focus listener")
+    subparsers.add_parser("focus-status", help="Show focus listener status")
+    subparsers.add_parser(
+        "focus-listener-run", help=argparse.SUPPRESS,
+    )  # hidden launchd entry point
+
     args = parser.parse_args()
     config = Config()
 
@@ -543,6 +620,10 @@ def main():
         "daemon-start": cmd_daemon_start,
         "daemon-stop": cmd_daemon_stop,
         "daemon-status": cmd_daemon_status,
+        "focus-enable": cmd_focus_enable,
+        "focus-disable": cmd_focus_disable,
+        "focus-status": cmd_focus_status,
+        "focus-listener-run": cmd_focus_listener_run,
     }
 
     if args.command in commands:
