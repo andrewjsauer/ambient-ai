@@ -24,3 +24,4 @@ venv/
 # Project
 memory/
 .context/
+.claude/
