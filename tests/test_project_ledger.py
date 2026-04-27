@@ -255,9 +255,7 @@ class TestPromptsAggregation:
 
 class TestSummaryCall:
     def test_summary_populated_from_api_response(self, tmp_path):
-        with patch(
-            "ambient.detect.project_ledger._api_available", return_value=True
-        ), patch("ambient.present.api.call_api") as mock_call:
+        with patch("ambient.present.api.call_api") as mock_call:
             mock_call.return_value = "Phase 2 git activity detector with subprocess hardening."
             layout = {
                 "-Users-andrew-proj": [_user_line(T_INSIDE, "ship the git activity detector")],
@@ -271,9 +269,7 @@ class TestSummaryCall:
             mock_call.assert_called_once()
 
     def test_summary_none_when_api_raises(self, tmp_path):
-        with patch(
-            "ambient.detect.project_ledger._api_available", return_value=True
-        ), patch("ambient.present.api.call_api", side_effect=RuntimeError("rate limited")):
+        with patch("ambient.present.api.call_api", side_effect=RuntimeError("rate limited")):
             layout = {
                 "-Users-andrew-proj": [_user_line(T_INSIDE, "hi")],
             }
@@ -301,9 +297,7 @@ class TestSummaryCall:
             mock_call.assert_not_called()
 
     def test_summary_skipped_when_no_prompts(self, tmp_path):
-        with patch(
-            "ambient.detect.project_ledger._api_available", return_value=True
-        ), patch("ambient.present.api.call_api") as mock_call:
+        with patch("ambient.present.api.call_api") as mock_call:
             # No JSONL files → no prompts → summary stays None, no API call
             events = [_claude_session_event("/Users/andrew/proj", duration_ms=15 * 60_000)]
             cfg = _config(tmp_path)
@@ -311,6 +305,66 @@ class TestSummaryCall:
             proj = next(e for e in result.entries if e.project == "proj")
             assert proj.summary is None
             mock_call.assert_not_called()
+
+
+class TestHyphenatedProjectMatch:
+    """Regression tests for the slug-match bug — hyphenated basenames silently
+    yielded empty representative_prompts under the prior tail-segment heuristic.
+    """
+
+    def test_hyphenated_basename_finds_prompts(self, tmp_path):
+        # Real-world repro: cwd /Users/x/Documents/EXAMPLE-ORG/ambient-ai
+        # encodes to slug -Users-x-Documents-EXAMPLE-ORG-ambient-ai. Old heuristic
+        # would only have matched a slug whose tail-segment was "ai".
+        layout = {
+            "-Users-x-Documents-EXAMPLE-ORG-ambient-ai": [
+                _user_line(T_INSIDE, "phase 2 review of the git activity detector"),
+            ],
+        }
+        root = _make_projects_dir(tmp_path, layout)
+        events = [
+            _claude_session_event(
+                "/Users/x/Documents/EXAMPLE-ORG/ambient-ai", duration_ms=15 * 60_000,
+            ),
+        ]
+        cfg = _config(tmp_path)
+        result = detect_project_ledger(
+            events, root, WINDOW_START, WINDOW_END, cfg, skip_summaries=True,
+        )
+        proj = next(e for e in result.entries if e.project == "ambient-ai")
+        assert proj.representative_prompts == ["phase 2 review of the git activity detector"]
+
+    def test_multiple_cwds_with_same_basename_unioned(self, tmp_path):
+        # Two projects with the same basename "api" at different paths.
+        # Both contribute prompts; both slugs are looked up.
+        layout = {
+            "-Users-x-work-foo-api": [_user_line(T_INSIDE, "from foo")],
+            "-Users-x-play-bar-api": [_user_line(T_INSIDE, "from bar")],
+        }
+        root = _make_projects_dir(tmp_path, layout)
+        events = [
+            _claude_session_event("/Users/x/work/foo/api", duration_ms=15 * 60_000),
+            _claude_session_event("/Users/x/play/bar/api", duration_ms=15 * 60_000),
+        ]
+        cfg = _config(tmp_path)
+        result = detect_project_ledger(
+            events, root, WINDOW_START, WINDOW_END, cfg, skip_summaries=True,
+        )
+        proj = next(e for e in result.entries if e.project == "api")
+        assert sorted(proj.representative_prompts) == ["from bar", "from foo"]
+
+    def test_no_matching_slug_yields_empty_prompts_no_crash(self, tmp_path):
+        # Event references a cwd whose JSONL slug doesn't exist on disk.
+        events = [
+            _claude_session_event("/Users/x/orphan-project", duration_ms=15 * 60_000),
+        ]
+        cfg = _config(tmp_path)
+        # Empty projects dir
+        result = detect_project_ledger(
+            events, tmp_path, WINDOW_START, WINDOW_END, cfg, skip_summaries=True,
+        )
+        proj = next(e for e in result.entries if e.project == "orphan-project")
+        assert proj.representative_prompts == []
 
 
 # ---------- Time-basis flag ----------

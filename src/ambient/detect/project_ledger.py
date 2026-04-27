@@ -8,9 +8,12 @@ For each project that crosses an active-time floor, builds a ledger entry with:
   - representative recent prompts (capped, truncated)
   - LLM-generated one-line summary of what the user worked on (Haiku)
 
-The summary call is per-project and prompt-cached; cost is ~$0.05/week at the
-inventory's volumes. When the API call fails, the entry still renders with
-`summary=None` — never blocks the rest of the report.
+Cost: per-project Haiku call, sequential, ~$0.10-0.20/week at the inventory's
+volumes (10-15 active projects × 1 call each). The system block is below the
+2048-token threshold for Haiku prompt caching, so cache_control on the system
+block is a no-op today; if cost grows, batch projects or move per-project
+context into the cached system block. When the API call fails, the entry still
+renders with `summary=None` — never blocks the rest of the report.
 
 Read-only contract: walks events + ~/.claude/projects/*.jsonl only. Never
 modifies any files. Never sends events outside the existing API boundary.
@@ -19,7 +22,6 @@ modifies any files. Never sends events outside the existing API boundary.
 from __future__ import annotations
 
 import logging
-import os
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -95,10 +97,13 @@ def detect_project_ledger(
     # Per-project file frequency from event metadata.
     files_per_project = _aggregate_files(events, top_files_n)
 
-    # Per-project prompts (most-recent first, capped, truncated) keyed by the
-    # JSONL slug — which differs from projects.detect_project_allocation's
-    # cwd-basename keys. We resolve the slug→display-name mismatch by matching
-    # tail-of-slug against the allocation project name.
+    # Build basename → set[full cwd] from events. Claude Code stores per-session
+    # JSONL under a slug derived as `cwd.replace("/", "-")`, so we can encode
+    # each cwd directly into the slug Claude Code uses. This avoids the earlier
+    # tail-of-slug heuristic that broke any project with a hyphenated basename
+    # (e.g. ambient-ai → tail "ai").
+    cwds_by_basename = _cwds_by_basename(events)
+
     prompts_by_slug = _aggregate_prompts(
         claude_projects_dir, window_start, window_end, max_prompts, truncate_chars
     )
@@ -107,8 +112,9 @@ def detect_project_ledger(
     for alloc in allocations:
         if alloc.total_ms < min_active_ms:
             continue
-        slug_match = _match_slug(alloc.project, prompts_by_slug.keys())
-        prompts = prompts_by_slug.get(slug_match, []) if slug_match else []
+        prompts = _prompts_for_project(
+            alloc.project, cwds_by_basename, prompts_by_slug, max_prompts
+        )
         entries.append(
             ProjectLedgerEntry(
                 project=alloc.project,
@@ -119,7 +125,7 @@ def detect_project_ledger(
             )
         )
 
-    if not skip_summaries and _api_available():
+    if not skip_summaries:
         for entry in entries:
             if not entry.representative_prompts:
                 continue
@@ -191,30 +197,58 @@ def _aggregate_prompts(
     return out
 
 
-def _match_slug(project_name: str, slugs) -> str | None:
-    """Match an allocation project (basename of cwd) to a JSONL slug.
+def _cwds_by_basename(events: list[Event]) -> dict[str, set[str]]:
+    """Build basename → set[full cwd] from events so we can encode the right slug.
 
-    Slugs in ~/.claude/projects/ are dash-encoded full paths
-    (e.g. -Users-you-projects-my-app). The trailing
-    segment matches the cwd basename. We pick the slug whose tail-segment
-    equals the project name; if multiple match, prefer the longest slug
-    (deepest path is most specific).
+    The basename is what `projects._derive_project` returns. Multiple cwds may
+    share a basename (e.g. ~/work/foo/api and ~/play/bar/api both have basename
+    "api"); the ledger handles that by encoding *every* candidate cwd to its
+    Claude Code slug and unioning the prompts.
     """
-    if not project_name:
-        return None
-    candidates = []
-    for slug in slugs:
-        tail = slug.rsplit("-", 1)[-1] if slug else ""
-        if tail == project_name:
-            candidates.append(slug)
-    if not candidates:
-        return None
-    return max(candidates, key=len)
+    by_basename: dict[str, set[str]] = {}
+    for event in events:
+        cwd = None
+        if event.type == "claude_session" and event.claude_project:
+            cwd = event.claude_project
+        elif event.cwd:
+            cwd = event.cwd
+        if not cwd:
+            continue
+        basename = PurePosixPath(cwd).name
+        if not basename or basename in ("~", "/", "tmp"):
+            continue
+        by_basename.setdefault(basename, set()).add(cwd)
+    return by_basename
 
 
-def _api_available() -> bool:
-    """Return True if the Anthropic API is callable in this environment."""
-    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+def _cwd_to_slug(cwd: str) -> str:
+    """Encode a cwd path into Claude Code's per-project slug format.
+
+    Claude Code stores per-session JSONL under ~/.claude/projects/<slug>/
+    where the slug is the absolute cwd with `/` replaced by `-`. So
+    `/Users/you/projects/my-app` becomes
+    `-Users-you-projects-my-app`.
+    """
+    return cwd.replace("/", "-")
+
+
+def _prompts_for_project(
+    basename: str,
+    cwds_by_basename: dict[str, set[str]],
+    prompts_by_slug: dict[str, list[str]],
+    max_prompts: int,
+) -> list[str]:
+    """Collect prompts for a project basename across all candidate cwds."""
+    cwds = cwds_by_basename.get(basename, set())
+    if not cwds:
+        return []
+    collected: list[str] = []
+    for cwd in cwds:
+        slug = _cwd_to_slug(cwd)
+        collected.extend(prompts_by_slug.get(slug, []))
+    if max_prompts and len(collected) > max_prompts:
+        return collected[:max_prompts]
+    return collected
 
 
 def _summarize(entry: ProjectLedgerEntry, config: Config, client) -> str | None:
