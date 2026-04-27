@@ -70,20 +70,27 @@ def is_agent_loaded() -> bool:
 def generate_focus_listener_plist(config: Config) -> dict:
     """Generate the launchd plist for the focus-listener daemon.
 
-    Different label, KeepAlive (restart on crash), RunAtLoad (opt-in start
-    immediately). Coexists with com.ambient.daemon.
+    Different label, conditional KeepAlive (restart on crash but NOT on clean
+    exit), RunAtLoad (opt-in start immediately), ThrottleInterval (cap respawn
+    rate to once per 30s so a missing-pyobjc deterministic failure doesn't
+    fill the log indefinitely). Coexists with com.ambient.daemon.
+
+    Stdout/stderr paths read from explicit Config fields rather than the
+    earlier str.replace trick — that pattern silently no-op'd for any
+    user-customized log path that didn't contain the literal string
+    'focus-listener.log', collapsing all three paths onto a single file.
     """
     return {
         "Label": FOCUS_LISTENER_LABEL,
         "ProgramArguments": [sys.executable, "-m", "ambient.cli", "focus-listener-run"],
-        "KeepAlive": True,
+        # KeepAlive policy: only restart on abnormal exit (crash). A clean
+        # exit (SIGTERM from `ambient focus-disable`) does NOT trigger respawn,
+        # and a deterministic non-zero exit (e.g. pyobjc missing) won't either.
+        "KeepAlive": {"SuccessfulExit": False, "Crashed": True},
         "RunAtLoad": True,
-        "StandardOutPath": str(config.focus_listener_log_path).replace(
-            "focus-listener.log", "focus-listener-stdout.log"
-        ),
-        "StandardErrorPath": str(config.focus_listener_log_path).replace(
-            "focus-listener.log", "focus-listener-stderr.log"
-        ),
+        "ThrottleInterval": 30,
+        "StandardOutPath": str(config.focus_listener_stdout_path),
+        "StandardErrorPath": str(config.focus_listener_stderr_path),
     }
 
 

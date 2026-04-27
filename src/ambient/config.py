@@ -153,11 +153,14 @@ class Config:
     # v4 Phase 2 Unit 7: NSWorkspace focus listener (separate launchd agent).
     # Off by default (cites docs/PRIVACY.md clause 6 — opt-in per signal class).
     # When enabled, app-activation events go to focus_events_path; the listener
-    # daemon's stdout/stderr go to focus_listener_log_path.
+    # daemon's stdout/stderr go to dedicated paths (separate from the daemon
+    # log file so launchd doesn't interleave with our logging.FileHandler).
     focus_capture_enabled: bool = False
     focus_events_path: Path = field(default=None)
     focus_listener_log_path: Path = field(default=None)
     focus_listener_lock_path: Path = field(default=None)
+    focus_listener_stdout_path: Path = field(default=None)
+    focus_listener_stderr_path: Path = field(default=None)
 
     def __post_init__(self):
         if self.logs_dir is None:
@@ -178,6 +181,10 @@ class Config:
             self.focus_listener_log_path = self.base_dir / "focus-listener.log"
         if self.focus_listener_lock_path is None:
             self.focus_listener_lock_path = self.daemon_dir / "focus-listener.lock"
+        if self.focus_listener_stdout_path is None:
+            self.focus_listener_stdout_path = self.base_dir / "focus-listener-stdout.log"
+        if self.focus_listener_stderr_path is None:
+            self.focus_listener_stderr_path = self.base_dir / "focus-listener-stderr.log"
 
     def ensure_dirs(self):
         self.logs_dir.mkdir(parents=True, exist_ok=True)

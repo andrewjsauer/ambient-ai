@@ -97,6 +97,28 @@ class TestHookScript:
         subprocess.run(["sh", str(script), "pane-focus-in"], env=env, check=True)
         assert events_path.exists()
 
+    def test_script_event_name_with_quote_emits_valid_json(self, tmp_path):
+        # Phase 2 review C4: quotes/backslashes/newlines in fields must be
+        # JSON-escaped or the JSONL line is malformed and silently dropped
+        # by the reader. The event-name arg is the simplest injection vector
+        # since the hook script accepts it as $1.
+        script = tmux_focus.hook_script_path()
+        events_path = tmp_path / "events.jsonl"
+        env = {
+            **os.environ,
+            "AMBIENT_FOCUS_EVENTS_PATH": str(events_path),
+            "TMUX_PANE": "%1",
+            "TMUX": "",
+        }
+        # Event name containing a double-quote and a backslash — both must
+        # be escaped to produce valid JSON.
+        weird_event = 'has"quote\\and-backslash'
+        subprocess.run(["sh", str(script), weird_event], env=env, check=True)
+        line = events_path.read_text().strip()
+        # Must parse as valid JSON despite the metachar payload.
+        record = json.loads(line)
+        assert record["event"] == weird_event
+
 
 # ---------- install/uninstall logic ----------
 
@@ -118,16 +140,44 @@ class TestInstall:
             mock_uninstall.assert_called_once()
             # one set-hook call per hook in HOOKS
             assert mock_run.call_count == len(tmux_focus.HOOKS)
-            for call, expected_hook in zip(mock_run.call_args_list, tmux_focus.HOOKS):
+            seen_hooks = set()
+            for call in mock_run.call_args_list:
                 args = call.args[0]
                 assert args[0] == "tmux"
                 assert args[1] == "set-hook"
-                assert args[2] == "-g"
-                assert args[3] == expected_hook
+                # `-ga` (append) so we don't clobber any pre-existing user hook
+                # (Phase 2 review: C2 / adv-2). The previous `-g` silently
+                # replaced user hooks.
+                assert args[2] == "-ga"
+                seen_hooks.add(args[3])
                 # The hook payload must reference the events path and the sentinel.
                 payload = args[4]
                 assert "ambient-focus-hook.sh" in payload
                 assert tmux_focus.SENTINEL in payload
+            assert seen_hooks == set(tmux_focus.HOOKS)
+
+    def test_install_uses_shlex_quote_for_injection_safety(self, tmp_path):
+        # Adversarial review adv-1: a path containing a double-quote MUST NOT
+        # break out of the run-shell payload. shlex.quote handles every shell
+        # metachar correctly; the prior _shell_quote only handled single quotes.
+        weird_path = tmp_path / 'has "quote and $dollar.jsonl'
+        with patch.object(tmux_focus, "tmux_available", return_value=True), \
+             patch.object(tmux_focus, "uninstall_hooks"), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="", stderr=""
+            )
+            tmux_focus.install_hooks(weird_path)
+            # The payload uses shlex.quote — wraps in single quotes since the
+            # path contains a double-quote and a dollar sign.
+            for call in mock_run.call_args_list:
+                payload = call.args[0][4]
+                # The dollar sign must be inside single quotes (no $-expansion at runtime).
+                # Find the AMBIENT_FOCUS_EVENTS_PATH= assignment and verify it's
+                # single-quoted around the path component.
+                assert "$dollar" in payload  # the literal char survives
+                # No unescaped double-quote that could close a quoted string.
+                assert '\\"' not in payload  # shlex.quote uses single-quote wrapping
 
     def test_uninstall_only_removes_ambient_managed_hooks(self):
         # show-hook returns the hook command; uninstall must SKIP user-managed

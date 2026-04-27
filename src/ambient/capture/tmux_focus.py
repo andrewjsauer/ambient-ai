@@ -16,6 +16,7 @@ Privacy contract (cites docs/PRIVACY.md clauses 6, 7):
 from __future__ import annotations
 
 import logging
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -48,6 +49,17 @@ def install_hooks(focus_events_path: Path) -> None:
     Each hook command exports AMBIENT_FOCUS_EVENTS_PATH so the shell script
     knows where to append. The sentinel comment lets uninstall_hooks remove
     only what we installed.
+
+    Quoting: every interpolated value passes through shlex.quote so paths
+    containing single/double quotes, dollar signs, backticks, or shell
+    substitutions cannot break out of the run-shell payload. Adversarial
+    review (adv-1) found the prior hand-rolled _shell_quote only escaped
+    single quotes, leaving a real injection path on weird $HOME values.
+
+    Append vs replace: uses `set-hook -ga` (append) so any pre-existing
+    user-managed hook on the same event continues to fire alongside the
+    Ambient hook. Plain `-g` (the previous code) clobbered user hooks
+    silently; uninstall would leave the slot permanently empty.
     """
     if not tmux_available():
         raise RuntimeError("tmux not found on PATH; nothing to install.")
@@ -59,25 +71,36 @@ def install_hooks(focus_events_path: Path) -> None:
         raise RuntimeError(f"tmux hook path is not a file: {script}")
 
     # Remove any existing Ambient-managed hooks before installing fresh ones,
-    # so re-running enable doesn't stack duplicates.
+    # so re-running enable doesn't stack our own duplicates. uninstall_hooks
+    # is sentinel-aware so it leaves user-managed hooks alone.
     uninstall_hooks()
 
+    quoted_path = shlex.quote(str(focus_events_path))
+    quoted_script = shlex.quote(str(script))
+
     for hook in HOOKS:
-        # Build the run-shell payload. Quote the events path; sentinel at end.
-        # Use single quotes around the outer payload so embedded path/quoting
-        # stays in tmux's set-hook arg.
         cmd = (
-            f'AMBIENT_FOCUS_EVENTS_PATH="{focus_events_path}" '
-            f'"{script}" {hook} {SENTINEL}'
+            f"AMBIENT_FOCUS_EVENTS_PATH={quoted_path} "
+            f"{quoted_script} {hook} {SENTINEL}"
         )
+        # tmux's run-shell takes a single shell-string arg; wrap in shlex.quote
+        # so the outer tmux-arg layer is also bulletproof.
+        run_shell_arg = f"run-shell {shlex.quote(cmd)}"
         subprocess.run(
-            ["tmux", "set-hook", "-g", hook, f"run-shell {_shell_quote(cmd)}"],
+            ["tmux", "set-hook", "-ga", hook, run_shell_arg],
             check=True,
         )
 
 
 def uninstall_hooks() -> None:
-    """Remove only Ambient-managed hooks; leave user-managed ones alone."""
+    """Remove Ambient-managed hooks. Skips slots without our sentinel.
+
+    Limitation: tmux's set-hook does not support selectively removing one
+    entry from an appended array — the only "remove" verb is `-gu` (unset
+    the whole slot). When install_hooks added our hook via `-ga` on top of
+    a pre-existing user hook, this uninstall will remove BOTH. Documented in
+    the CLI help; users with custom hooks can re-add them after disable.
+    """
     if not tmux_available():
         return
     for hook in HOOKS:
@@ -110,11 +133,3 @@ def is_installed() -> bool:
         if result.returncode == 0 and SENTINEL in result.stdout:
             return True
     return False
-
-
-def _shell_quote(s: str) -> str:
-    """Wrap `s` for safe inclusion as a single tmux set-hook payload arg."""
-    # tmux set-hook accepts a single string after the hook name; we pass the
-    # entire payload here. Wrap in single quotes; escape any embedded single
-    # quotes by closing-quoting-reopening.
-    return "'" + s.replace("'", "'\\''") + "'"

@@ -136,8 +136,29 @@ class TestFocusListenerPlist:
 
     def test_plist_keepalive_for_long_lived_process(self, tmp_path):
         plist = generate_focus_listener_plist(_config(tmp_path))
-        assert plist["KeepAlive"] is True
+        # Phase 2 review: KeepAlive is now conditional — restart on crash but
+        # NOT on clean exit (REL-01 / adv-5: prevents crash loop on missing
+        # pyobjc and respects `ambient focus-disable` SIGTERM).
+        assert plist["KeepAlive"] == {"SuccessfulExit": False, "Crashed": True}
         assert plist["RunAtLoad"] is True
+        assert plist["ThrottleInterval"] == 30  # respawn rate cap
+
+    def test_plist_log_paths_use_explicit_config_fields(self, tmp_path):
+        # Earlier code derived stdout/stderr paths via str.replace on the
+        # focus_listener_log_path Config field — silent no-op if the user
+        # customized that path (K2 P1). Now they come from explicit fields.
+        from ambient.config import Config
+        cfg = Config(base_dir=tmp_path / ".ambient")
+        # Simulate a user who renamed the log file.
+        cfg.focus_listener_log_path = tmp_path / ".ambient" / "renamed.log"
+        cfg.focus_listener_stdout_path = tmp_path / ".ambient" / "out.log"
+        cfg.focus_listener_stderr_path = tmp_path / ".ambient" / "err.log"
+        plist = generate_focus_listener_plist(cfg)
+        assert plist["StandardOutPath"] == str(cfg.focus_listener_stdout_path)
+        assert plist["StandardErrorPath"] == str(cfg.focus_listener_stderr_path)
+        # The three paths must be distinct.
+        assert plist["StandardOutPath"] != plist["StandardErrorPath"]
+        assert plist["StandardOutPath"] != str(cfg.focus_listener_log_path)
 
     def test_plist_program_args_invoke_focus_listener_run(self, tmp_path):
         plist = generate_focus_listener_plist(_config(tmp_path))
@@ -147,10 +168,10 @@ class TestFocusListenerPlist:
 
     def test_plist_log_paths_use_focus_listener_basename(self, tmp_path):
         plist = generate_focus_listener_plist(_config(tmp_path))
-        # The launchd stdout/stderr go to focus-listener-{stdout,stderr}.log,
-        # not the tick daemon's launchd-{stdout,stderr}.log.
-        assert "focus-listener" in plist["StandardOutPath"]
-        assert "focus-listener" in plist["StandardErrorPath"]
+        # The launchd stdout/stderr go to focus-listener-{stdout,stderr}.log
+        # (default naming), not the tick daemon's launchd-{stdout,stderr}.log.
+        assert "focus-listener-stdout" in plist["StandardOutPath"]
+        assert "focus-listener-stderr" in plist["StandardErrorPath"]
 
 
 # ---------- Off-by-default config ----------
