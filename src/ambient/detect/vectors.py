@@ -25,21 +25,29 @@ aggregation helpers.
 from __future__ import annotations
 
 import logging
-import re
+from collections import Counter
 from dataclasses import dataclass, field
-from typing import Literal
+from datetime import datetime, timezone
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING, Iterable, Literal
 
 from ambient.detect.slash_taxonomy import (
     classify_slash_command,
     extract_slash_command,
 )
 
+if TYPE_CHECKING:
+    from ambient.capture.reader import Event
+    from ambient.config import Config
+    from ambient.detect.focus_events import FocusEvent
+    from ambient.detect.pauses import PauseFindings
+
 logger = logging.getLogger(__name__)
 
 StopReason = Literal["enter", "pause", "focus_change", "exit", "end_of_window"]
 VectorCategory = Literal[
     "planning", "execution", "review", "design",
-    "thinking", "freeform", "meta", "other",
+    "thinking", "freeform", "meta",
 ]
 
 # Tie-break order when multiple stop events fire at the same ms. The "harder"
@@ -59,8 +67,7 @@ _STOP_PRIORITY: dict[StopReason, int] = {
 _EXECUTION_PREFIXES: frozenset[str] = frozenset({
     "make", "npm", "pnpm", "yarn", "cargo", "go", "pytest", "python", "python3",
     "bin/rails", "rails", "bundle", "docker", "gh", "git", "tsc", "eslint",
-    "ruff", "mypy", "rspec", "jest", "vitest", "pytest", "build", "test",
-    "lint", "deploy", "ship", "release",
+    "ruff", "mypy", "rspec", "jest", "vitest",
 })
 
 # When stop_reason == "pause" and last_text is short or empty, the vector
@@ -114,10 +121,10 @@ class VectorFindings:
     """Result of detect_vectors. All counters mirror `vectors` for cheap rendering."""
 
     vectors: list[Vector] = field(default_factory=list)
-    count_by_stop_reason: dict[str, int] = field(default_factory=dict)
-    total_duration_by_stop_reason: dict[str, int] = field(default_factory=dict)
+    count_by_stop_reason: dict[StopReason, int] = field(default_factory=dict)
+    total_duration_by_stop_reason: dict[StopReason, int] = field(default_factory=dict)
     count_by_project: dict[str, int] = field(default_factory=dict)
-    count_by_classification: dict[str, int] = field(default_factory=dict)
+    count_by_classification: dict[VectorCategory, int] = field(default_factory=dict)
     window_start_iso: str = ""
     window_end_iso: str = ""
 
@@ -158,24 +165,6 @@ def classify_vector(
     return "freeform"
 
 
-def classify_vector_from_text(
-    last_text: str,
-    stop_reason: StopReason,
-    overrides: dict[str, str] | None = None,
-) -> VectorCategory:
-    """Convenience: extract slash command from text first, then classify.
-
-    Useful when the caller has only the raw text and doesn't already know
-    whether it contains a `<command-name>` marker.
-    """
-    return classify_vector(
-        last_text=last_text,
-        stop_reason=stop_reason,
-        slash_command=extract_slash_command(last_text),
-        overrides=overrides,
-    )
-
-
 # --------------------------------------------------------------------------
 # Unit 2: stop-event enumeration + vector detection
 # --------------------------------------------------------------------------
@@ -198,17 +187,11 @@ def _pause_qualifies(label: str, min_label: str) -> bool:
 
 
 def _project_from_event(event) -> str:
-    """Mirror of projects._derive_project; kept local so vectors.py has no
-    detect-layer cross-import dependency."""
-    from pathlib import PurePosixPath
-    if event.type == "claude_session" and getattr(event, "claude_project", None):
-        return PurePosixPath(event.claude_project).name or "unknown"
-    if event.cwd:
-        name = PurePosixPath(event.cwd).name
-        if name in ("", "~", "/", "tmp"):
-            return "unknown"
-        return name
-    return "unknown"
+    """Project derivation. Defers to projects._derive_project to avoid the
+    third copy of identical logic the maintainability review flagged.
+    """
+    from ambient.detect.projects import _derive_project
+    return _derive_project(event)
 
 
 def _enumerate_stops(
@@ -249,13 +232,20 @@ def _enumerate_stops(
             ))
 
     # 2. Pause classifications → "pause" stop at the gap's end ts.
+    # PauseClassification.ts_start is the *next* event's ts_start (set in
+    # pauses.classify()), which equals the pause-end. Do NOT add gap_ms — that
+    # would double-count the gap and place pause stops past the next command.
     if pauses is not None:
         classifications = getattr(pauses, "classifications", None) or []
         min_label = getattr(config, "vector_pause_min_label", "evaluating")
+        unrecognized_labels: set[str] = set()
         for pc in classifications:
+            if pc.label not in _PAUSE_LABEL_SEVERITY:
+                unrecognized_labels.add(pc.label)
+                continue
             if not _pause_qualifies(pc.label, min_label):
                 continue
-            ts_end = (pc.ts_start or 0) + (pc.gap_ms or 0)
+            ts_end = pc.ts_start or 0
             if ts_end < window_start_ms or ts_end > window_end_ms:
                 continue
             stops.append(StopEvent(
@@ -265,11 +255,21 @@ def _enumerate_stops(
                 project="",  # pause carries no project; resolved during aggregation
                 pause_duration_ms=pc.gap_ms,
             ))
+        if unrecognized_labels:
+            logger.warning(
+                "vectors: %d pause label(s) not in known severity table %s; "
+                "pause stops dropped silently. Add to _PAUSE_LABEL_SEVERITY if intended.",
+                len(unrecognized_labels), sorted(unrecognized_labels),
+            )
 
     # 3. Focus events → "focus_change" stops, debounced.
+    # Sort by ts BEFORE debouncing so out-of-order input (concurrent NSWorkspace
+    # + tmux writers may interleave) doesn't drop a legitimate event whose ts
+    # is earlier than the previously-seen one.
     debounce_ms = max(0, getattr(config, "vector_focus_debounce_ms", 2000))
+    sorted_focus = sorted(focus_events or [], key=lambda fe: fe.ts)
     last_focus_ts: int | None = None
-    for fe in focus_events or []:
+    for fe in sorted_focus:
         ts_ms = int(fe.ts.timestamp() * 1000)
         if ts_ms < window_start_ms or ts_ms > window_end_ms:
             continue
@@ -304,20 +304,19 @@ def _enumerate_stops(
 
 def _project_for_window(events_in_window: list, fallback: str) -> str:
     """Pick the most-frequent project among events that fall inside a vector."""
-    from collections import Counter
     if not events_in_window:
         return fallback or "unknown"
-    counts = Counter(_project_from_event(e) for e in events_in_window)
+    counts: Counter[str] = Counter(_project_from_event(e) for e in events_in_window)
     return counts.most_common(1)[0][0]
 
 
 def detect_vectors(
-    events,
-    focus_events,
-    pauses,
+    events: list["Event"] | None,
+    focus_events: list["FocusEvent"] | None,
+    pauses: "PauseFindings | None",
     window_start_ms: int,
     window_end_ms: int,
-    config,
+    config: "Config",
 ) -> VectorFindings:
     """Build VectorFindings for the window.
 
@@ -352,11 +351,16 @@ def detect_vectors(
     cursor_ms = window_start_ms
     last_app_focus: str | None = None
     last_tmux_focus: str | None = None
+    last_project: str = "unknown"  # carries forward when a vector has no events
 
     for stop in stops:
-        if stop.ts_ms <= cursor_ms:
-            # Empty vector — skip but still update cursor and focus state.
-            cursor_ms = stop.ts_ms
+        if stop.ts_ms < cursor_ms:
+            # Stop predates cursor (shouldn't happen with the global sort, but
+            # defend against future changes). Skip without rewinding.
+            continue
+        if stop.ts_ms == cursor_ms:
+            # Empty vector — no time elapsed. Update focus state so it carries
+            # to the next vector, but do not emit a zero-duration record.
             if stop.reason == "focus_change":
                 last_app_focus = stop.app_focus
                 last_tmux_focus = stop.tmux_pane_focus
@@ -366,7 +370,18 @@ def detect_vectors(
             e for e in sorted_events
             if cursor_ms <= e.ts_start < stop.ts_ms
         ]
-        project = stop.project or _project_for_window(events_in_vector, fallback="unknown")
+        # Project resolution: stop.project (set for command/session stops) wins;
+        # otherwise the most-frequent project among events_in_vector; otherwise
+        # carry forward last_project so empty pause-terminated vectors don't
+        # collapse to "unknown".
+        if stop.project:
+            project = stop.project
+        elif events_in_vector:
+            project = _project_for_window(events_in_vector, fallback=last_project)
+        else:
+            project = last_project
+        last_project = project
+
         last_text = stop.text
         slash_cmd = extract_slash_command(last_text) if last_text else None
         cls = classify_vector(
@@ -425,7 +440,6 @@ def _build_findings(
 
 
 def _ms_to_iso(ms: int) -> str:
-    from datetime import datetime, timezone
     if ms <= 0:
         return ""
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
@@ -451,15 +465,14 @@ def top_vectors_per_project(
     }
 
 
-def vectors_by_day(findings: VectorFindings):
+def vectors_by_day(findings: VectorFindings) -> dict:
     """Bucket vectors by their start-day (local time).
 
     Mirrors insights._format_by_day_summary's date-bucketing convention so the
     by-day renderer can show vector activity alongside project time.
     """
     from collections import defaultdict
-    from datetime import datetime, date as _date
-    out: dict[_date, list[Vector]] = defaultdict(list)
+    out: dict = defaultdict(list)
     for v in findings.vectors:
         d = datetime.fromtimestamp(v.ts_start / 1000).date()
         out[d].append(v)
@@ -478,8 +491,3 @@ def stop_reason_summary(
     return rows
 
 
-def longest_vectors(findings: VectorFindings, n: int) -> list[Vector]:
-    """Top-n longest vectors across all projects."""
-    if n <= 0:
-        return []
-    return sorted(findings.vectors, key=lambda v: v.duration_ms, reverse=True)[:n]

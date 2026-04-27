@@ -9,7 +9,6 @@ from ambient.detect.vectors import (
     StopReason,
     StopEvent,
     classify_vector,
-    classify_vector_from_text,
 )
 
 
@@ -121,22 +120,6 @@ class TestClassifyVectorKeyword:
         assert classify_vector("npm test", "end_of_window") == "execution"
 
 
-class TestClassifyVectorFromText:
-    def test_extracts_slash_marker_from_raw_prompt_body(self):
-        body = (
-            "<command-message>compound-engineering:ce-plan</command-message>\n"
-            "<command-name>/compound-engineering:ce-plan</command-name>\n"
-            "<command-args></command-args>"
-        )
-        assert classify_vector_from_text(body, "enter") == "planning"
-
-    def test_no_slash_marker_falls_through_to_keyword(self):
-        assert classify_vector_from_text("npm test", "enter") == "execution"
-
-    def test_freeform_text_no_marker(self):
-        assert classify_vector_from_text("just thinking out loud", "enter") == "freeform"
-
-
 class TestVectorDataclass:
     def test_basic_construction(self):
         v = Vector(
@@ -219,12 +202,19 @@ def _focus(ts_ms: int, bundle_id: str = "com.apple.Terminal", source: str = "nsw
     )
 
 
-def _pause(ts_ms: int, gap_ms: int, label: str = "evaluating", preceding: str = "") -> PauseClassification:
+def _pause(end_ts_ms: int, gap_ms: int, label: str = "evaluating", preceding: str = "") -> PauseClassification:
+    """Build a PauseClassification matching pauses.classify() semantics.
+
+    `ts_start` in PauseClassification is set to the NEXT event's ts_start
+    (see pauses.py:179) — i.e. the gap/pause-end timestamp. The detector
+    uses this directly as the stop-event timestamp; the helper takes
+    end_ts_ms to make the test intent explicit.
+    """
     return PauseClassification(
         gap_ms=gap_ms, label=label,
         probabilities={label: 1.0},
         preceding_command=preceding, following_command="",
-        ts_start=ts_ms,
+        ts_start=end_ts_ms,
     )
 
 
@@ -332,7 +322,8 @@ class TestDetectVectorsEdgeCases:
         # Pause should win (higher priority).
         ts = WINDOW_START + 600_000
         events = [_command_event(ts - 1_000, 1_000, "ls")]  # ts_end = ts
-        pauses = _pause_findings(_pause(ts - 30_000, 30_000, label="stuck"))
+        # Pause-end ts == ts (collision with the enter stop at ts).
+        pauses = _pause_findings(_pause(ts, 30_000, label="stuck"))
         result = detect_vectors(events, [], pauses, WINDOW_START, WINDOW_END, cfg)
         # The vector ending at `ts` should be a pause vector, not enter.
         v_at_ts = next((v for v in result.vectors if v.ts_end == ts), None)
@@ -392,7 +383,6 @@ class TestDetectVectorsAggregates:
 # ---------- Unit 3: aggregation surfaces ----------
 
 from ambient.detect.vectors import (
-    longest_vectors,
     stop_reason_summary,
     top_vectors_per_project,
     vectors_by_day,
@@ -442,6 +432,86 @@ class TestVectorsByDay:
         assert len(result[days[1]]) == 2
 
 
+class TestPhase3ReviewRegressions:
+    """Regression tests for findings from the Phase 3 review (commit 9fba7a5)."""
+
+    def test_pause_stop_uses_ts_start_directly_not_added_to_gap(self, tmp_path):
+        # P0: PauseClassification.ts_start IS the pause-end (matches the
+        # next event's ts_start; see pauses.py:179). Earlier code added
+        # gap_ms again, double-counting. Verify the stop fires at ts_start.
+        cfg = _config(tmp_path)
+        pause_end_ts = WINDOW_START + 600_000
+        pauses = _pause_findings(_pause(pause_end_ts, 60_000, label="stuck"))
+        result = detect_vectors([], [], pauses, WINDOW_START, WINDOW_END, cfg)
+        pause_vectors = [v for v in result.vectors if v.stop_reason == "pause"]
+        assert len(pause_vectors) == 1
+        # The vector ending at the pause must end at pause_end_ts, NOT at
+        # pause_end_ts + 60_000 (which would be past the actual pause end).
+        assert pause_vectors[0].ts_end == pause_end_ts
+
+    def test_unknown_pause_label_logs_warning(self, tmp_path, caplog):
+        # C4: unrecognized labels are silently dropped. Now they log once
+        # per detector run so the user knows pauses dropped due to label drift.
+        cfg = _config(tmp_path)
+        pauses = _pause_findings(
+            _pause(WINDOW_START + 600_000, 60_000, label="long-tail-novel-label"),
+        )
+        with caplog.at_level("WARNING"):
+            detect_vectors([], [], pauses, WINDOW_START, WINDOW_END, cfg)
+        assert any("long-tail-novel-label" in rec.message for rec in caplog.records)
+
+    def test_last_project_carries_to_pause_terminated_empty_vector(self, tmp_path):
+        # C3: a pause-terminated vector with no events_in_vector previously
+        # collapsed to project='unknown'. Now it carries forward the prior
+        # vector's project.
+        cfg = _config(tmp_path)
+        events = [_command_event(WINDOW_START + 60_000, 1_000, "ls", cwd="/repo/proj-a")]
+        # Pause ends well after the command's ts_end → no events fall inside
+        # the pause vector.
+        pauses = _pause_findings(
+            _pause(WINDOW_START + 600_000, 300_000, label="stuck", preceding="ls"),
+        )
+        result = detect_vectors(events, [], pauses, WINDOW_START, WINDOW_END, cfg)
+        pause_v = next(v for v in result.vectors if v.stop_reason == "pause")
+        assert pause_v.project == "proj-a"  # not "unknown"
+
+    def test_focus_events_sorted_before_debounce(self, tmp_path):
+        # C5: out-of-order focus events were dropped erroneously. Sort then
+        # debounce so a legitimate later-arriving-but-earlier-ts event still
+        # fires its stop.
+        cfg = _config(tmp_path)
+        cfg.vector_focus_debounce_ms = 1000
+        # Two events 5 seconds apart, but presented in REVERSE chronological order.
+        focus = [
+            _focus(WINDOW_START + 70_000, "com.apple.Terminal"),
+            _focus(WINDOW_START + 60_000, "com.apple.Terminal"),  # earlier ts, listed second
+        ]
+        result = detect_vectors([], focus, None, WINDOW_START, WINDOW_END, cfg)
+        # Both events fire (5s apart > 1s debounce), regardless of input order.
+        focus_count = result.count_by_stop_reason.get("focus_change", 0)
+        assert focus_count == 2
+
+    def test_vector_category_no_other_member(self):
+        # K3: VectorCategory previously had "other" but classify_vector
+        # demoted "other" to "freeform", leaving "other" unreachable. Removed.
+        from typing import get_args
+        from ambient.detect.vectors import VectorCategory
+        assert "other" not in get_args(VectorCategory)
+
+
+class TestPhase3InsightsSystemNumbering:
+    def test_section_numbers_are_unique_and_monotonic(self):
+        # C2 / M-02 / K9: Phase 3 introduced VECTORS as section 4 but Top
+        # Finding was already 4. Numbering must be unique and monotonic.
+        from ambient.present.insights import INSIGHTS_SYSTEM
+        import re
+
+        section_lines = re.findall(r"^(\d+)\. \*\*", INSIGHTS_SYSTEM, flags=re.MULTILINE)
+        nums = [int(n) for n in section_lines]
+        assert nums == sorted(set(nums)), f"section numbers not unique/monotonic: {nums}"
+        assert nums == list(range(1, len(nums) + 1)), f"section numbers not contiguous from 1: {nums}"
+
+
 class TestStopReasonSummary:
     def test_sorts_by_total_duration_desc(self):
         f = VectorFindings(
@@ -456,17 +526,3 @@ class TestStopReasonSummary:
         assert result[1][0] == "enter"
 
 
-class TestLongestVectors:
-    def test_returns_top_n_overall(self):
-        f = VectorFindings(vectors=[
-            _v(0, 100, "a"),
-            _v(0, 500, "b"),
-            _v(0, 1000, "c"),
-            _v(0, 200, "d"),
-        ])
-        result = longest_vectors(f, n=2)
-        assert [v.duration_ms for v in result] == [1000, 500]
-
-    def test_n_zero_returns_empty(self):
-        f = VectorFindings(vectors=[_v(0, 100)])
-        assert longest_vectors(f, n=0) == []

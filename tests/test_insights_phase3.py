@@ -147,3 +147,46 @@ class TestVectorsCli:
 
 
 import os  # late import for the tmp_path test above
+
+
+class TestPhase3WiringEndToEnd:
+    """T-P1-01 / T-P1-02 regressions: aggregate_coaching_data wiring of vectors."""
+
+    def test_aggregate_coaching_data_populates_vectors_field(self, tmp_path):
+        # End-to-end: aggregate_coaching_data → _aggregate_window → detect_vectors.
+        # Empty event log + empty focus events → vectors is non-None and contains
+        # at least the synthesized end_of_window vector covering the window.
+        from ambient.config import Config
+        from ambient.present import insights as insights_mod
+
+        cfg = Config(base_dir=tmp_path / ".ambient")
+        cfg.ensure_dirs()
+        cfg.claude_projects_dir = tmp_path / "projects"
+        cfg.claude_projects_dir.mkdir()
+
+        result = insights_mod.aggregate_coaching_data(cfg, window_days=7, compare=False)
+
+        # CoachingData.vectors is wired and non-None even with no events
+        # (the end_of_window stop synthesizes a single window-spanning vector).
+        assert result.vectors is not None
+        assert len(result.vectors.vectors) == 1
+        assert result.vectors.vectors[0].stop_reason == "end_of_window"
+
+    def test_aggregate_skips_vectors_on_prior_window(self, tmp_path):
+        # T-P1-02 corollary: when compare=True, the prior _aggregate_window
+        # call uses skip_phase1=True, which must zero-out vectors too.
+        from unittest.mock import patch
+        from ambient.config import Config
+        from ambient.present import insights as insights_mod
+
+        cfg = Config(base_dir=tmp_path / ".ambient")
+        cfg.ensure_dirs()
+        cfg.claude_projects_dir = tmp_path / "projects"
+        cfg.claude_projects_dir.mkdir()
+
+        with patch.object(insights_mod, "detect_vectors") as mock_detect:
+            mock_detect.return_value = insights_mod.VectorFindings()
+            insights_mod.aggregate_coaching_data(cfg, window_days=7, compare=True)
+
+        # Phase 1+ detectors run exactly once (current window only, not prior).
+        assert mock_detect.call_count == 1
