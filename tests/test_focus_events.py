@@ -342,3 +342,44 @@ class TestAttentionWeightedAllocation:
         findings = detect_project_allocation(events, cfg, attention_intervals=intervals)
         # Union covers full event → 600_000 ms (NOT 600 + double-count).
         assert findings.allocations[0].total_ms == 600_000
+
+
+class TestEndToEndAttentionWeighted:
+    """Phase 2 review testing-005: end-to-end coverage that focus-events.jsonl
+    on disk drives time_basis='attention_weighted' through the orchestrator.
+    """
+
+    def test_focus_events_file_flips_time_basis_to_attention_weighted(self, tmp_path):
+        # Real wiring: aggregate_coaching_data → _aggregate_window →
+        # read_focus_events (file) → compute_attention_intervals → projects
+        # → ProjectLedger.time_basis. P0 cursor bug (e88aadf) would have
+        # silently no-op'd this end-to-end.
+        from datetime import datetime as _dt
+        from ambient.config import Config
+        from ambient.present import insights as insights_mod
+
+        cfg = Config(base_dir=tmp_path / ".ambient")
+        cfg.ensure_dirs()
+        cfg.claude_projects_dir = tmp_path / "projects"
+        cfg.claude_projects_dir.mkdir()
+
+        # Write a focus-events.jsonl with a terminal activation followed by a
+        # non-terminal — produces one attention interval covering ~1 hour.
+        # Use a recent timestamp so the default 30-day window includes it.
+        recent = _dt.now(timezone.utc) - timedelta(hours=2)
+        terminal_ts = recent.isoformat()
+        non_terminal_ts = (recent + timedelta(hours=1)).isoformat()
+        cfg.focus_events_path.write_text(
+            f'{{"ts":"{terminal_ts}","source":"nsworkspace","event":"app_activated","bundle_id":"com.apple.Terminal","app_name":"Terminal","pid":1}}\n'
+            f'{{"ts":"{non_terminal_ts}","source":"nsworkspace","event":"app_activated","bundle_id":"com.apple.Safari","app_name":"Safari","pid":2}}\n'
+        )
+
+        # Empty events file → project_ledger.entries will be [] but the
+        # time_basis flag still reflects the upstream attention path.
+        result = insights_mod.aggregate_coaching_data(cfg, window_days=7, compare=False)
+
+        assert result.project_ledger is not None
+        # The headline assertion: focus events were read AND interpreted, so
+        # ProjectLedger.time_basis is now 'attention_weighted'. If the P0 cursor
+        # bug regressed, this would silently be 'command_span'.
+        assert result.project_ledger.time_basis == "attention_weighted"

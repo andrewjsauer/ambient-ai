@@ -80,6 +80,24 @@ def build_focus_record(payload: dict, *, ts: datetime | None = None) -> FocusRec
     )
 
 
+def record_from_running_app(running_app) -> FocusRecord:
+    """Build a FocusRecord from an NSRunningApplication-like object.
+
+    Calls ONLY the three allowlisted accessors: bundleIdentifier(),
+    localizedName(), processIdentifier(). Real NSRunningApplication exposes
+    many more methods (executableURL, ownsMenuBar, isFinishedLaunching,
+    bundleURL, …) — this function deliberately does not call any of them.
+    Adding a new accessor here is a privacy-policy amendment, not a code
+    change. Cites docs/PRIVACY.md clauses 6, 7.
+    """
+    payload = {
+        "bundle_id": _coerce_str(running_app.bundleIdentifier()),
+        "app_name": _coerce_str(running_app.localizedName()),
+        "pid": _coerce_int(running_app.processIdentifier()),
+    }
+    return build_focus_record(payload)
+
+
 def append_record(record: FocusRecord, path: Path) -> bool:
     """Append a FocusRecord to the JSONL output path. Returns True on success.
 
@@ -123,12 +141,7 @@ def subscribe(on_event: Callable[[FocusRecord], None]) -> None:
                 running_app = user_info.objectForKey_("NSWorkspaceApplicationKey")
                 if running_app is None:
                     return
-                payload = {
-                    "bundle_id": _coerce_str(running_app.bundleIdentifier()),
-                    "app_name": _coerce_str(running_app.localizedName()),
-                    "pid": _coerce_int(running_app.processIdentifier()),
-                }
-                record = build_focus_record(payload)
+                record = record_from_running_app(running_app)
                 on_event(record)
             except Exception as exc:  # pragma: no cover — runtime safety
                 logger.warning("focus_listener observer error: %s", exc)

@@ -10,6 +10,7 @@ Privacy-clause-citing tests verify that:
 """
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -209,4 +210,105 @@ class TestSubscribe:
         with patch.object(builtins, "__import__", block_appkit):
             with pytest.raises(RuntimeError) as exc_info:
                 nsworkspace_listener.subscribe(lambda r: None)
-            assert "pyobjc" in str(exc_info.value).lower()
+            err = str(exc_info.value).lower()
+            assert "pyobjc" in err
+            # Helpful install hint — not just "pyobjc missing".
+            assert "pip install" in err
+
+
+class TestLiveObserverPrivacy:
+    """Phase 2 review testing-002: privacy contract was being asserted only
+    against build_focus_record (a tautology against the dataclass). These
+    tests exercise the live boundary — record_from_running_app — with a
+    realistic mock NSRunningApplication that exposes forbidden accessors.
+    """
+
+    def test_record_only_calls_allowlisted_accessors(self):
+        from unittest.mock import MagicMock
+        from ambient.capture.nsworkspace_listener import record_from_running_app
+
+        # Mock an NSRunningApplication-like object with extra forbidden
+        # methods. spec lets us assert at the end that only allowed ones
+        # were called.
+        running_app = MagicMock(spec=[
+            "bundleIdentifier", "localizedName", "processIdentifier",
+            # Forbidden — exists on real NSRunningApplication but must
+            # never be touched by this code path:
+            "executableURL", "bundleURL", "windowTitle", "ownsMenuBar",
+            "isFinishedLaunching", "icon", "isHidden", "isActive",
+        ])
+        running_app.bundleIdentifier.return_value = "com.apple.Safari"
+        running_app.localizedName.return_value = "Safari"
+        running_app.processIdentifier.return_value = 12345
+        # The forbidden methods would return PII if called.
+        running_app.executableURL.return_value = "/Applications/Safari.app"
+        running_app.windowTitle.return_value = "secrets.env — Vim"
+        running_app.bundleURL.return_value = "/Applications/Safari.app"
+
+        record = record_from_running_app(running_app)
+
+        # Only the three allowlisted accessors were called.
+        running_app.bundleIdentifier.assert_called_once()
+        running_app.localizedName.assert_called_once()
+        running_app.processIdentifier.assert_called_once()
+        # NONE of the forbidden ones were called.
+        running_app.executableURL.assert_not_called()
+        running_app.windowTitle.assert_not_called()
+        running_app.bundleURL.assert_not_called()
+        running_app.ownsMenuBar.assert_not_called()
+        running_app.isFinishedLaunching.assert_not_called()
+        running_app.icon.assert_not_called()
+
+        # Record contains the four allowed fields.
+        line = record.to_jsonl()
+        parsed = json.loads(line)
+        assert set(parsed.keys()) == {
+            "ts", "source", "event", "bundle_id", "app_name", "pid"
+        }
+        assert "windowTitle" not in line
+        assert "executableURL" not in line
+        assert "secrets.env" not in line
+
+
+class TestFocusListenerRunLifecycle:
+    """Phase 2 review testing-001: focus_listener.run() was uncovered."""
+
+    def test_run_acquires_lock_then_releases_on_exit(self, tmp_path):
+        from unittest.mock import patch
+        from ambient.daemon import focus_listener as fl
+
+        cfg = _config(tmp_path)
+        # subscribe() does the OS work; mock it to return immediately so run()
+        # falls through its try/finally and releases the lock.
+        with patch.object(fl, "subscribe", return_value=None):
+            exit_code = fl.run(cfg)
+        assert exit_code == 0
+        # Lock file should NOT be held after a clean run (release_lock removes it).
+        assert not cfg.focus_listener_lock_path.exists()
+
+    def test_run_releases_lock_when_subscribe_raises_runtime_error(self, tmp_path):
+        from unittest.mock import patch
+        from ambient.daemon import focus_listener as fl
+
+        cfg = _config(tmp_path)
+        with patch.object(fl, "subscribe", side_effect=RuntimeError("no pyobjc")):
+            exit_code = fl.run(cfg)
+        assert exit_code == 2  # error path
+        # Even on failure, the lock must be released so the next attempt
+        # (e.g. after pip install pyobjc) can acquire it.
+        assert not cfg.focus_listener_lock_path.exists()
+
+    def test_run_returns_1_when_already_locked(self, tmp_path):
+        from unittest.mock import patch
+        from ambient.daemon import focus_listener as fl
+
+        cfg = _config(tmp_path)
+        # Pre-acquire the lock with a live PID (this process).
+        cfg.focus_listener_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg.focus_listener_lock_path.write_text(str(os.getpid()))
+
+        with patch.object(fl, "subscribe") as mock_subscribe:
+            exit_code = fl.run(cfg)
+        assert exit_code == 1
+        # Subscribe was never called — the lock guard short-circuited.
+        mock_subscribe.assert_not_called()
