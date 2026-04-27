@@ -542,6 +542,37 @@ def cmd_focus_listener_run(config: Config, args):
     sys.exit(run(config))
 
 
+def cmd_tmux_focus_enable(config: Config, args):
+    """Opt-in: install tmux pane/window focus hooks (Phase 2 Unit 8)."""
+    from ambient.capture import tmux_focus
+
+    config.ensure_dirs()
+    if not tmux_focus.tmux_available():
+        print("Error: tmux not found on PATH.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        tmux_focus.install_hooks(config.focus_events_path)
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print("tmux focus hooks installed.")
+    print(f"  Hooks: {', '.join(tmux_focus.HOOKS)}")
+    print(f"  Events appended to: {config.focus_events_path}")
+    print(f"  Privacy contract: docs/PRIVACY.md (clauses 6, 7)")
+    print(f"  Captured fields: pane_id, window_index, session_name, event, ts")
+    print(f"  NEVER captured: pane_title, pane_current_command, pane_current_path")
+    print(f"\nTo stop: ambient tmux-focus-disable")
+
+
+def cmd_tmux_focus_disable(config: Config, args):
+    from ambient.capture import tmux_focus
+    if not tmux_focus.tmux_available():
+        print("tmux not found on PATH; nothing to remove.")
+        return
+    tmux_focus.uninstall_hooks()
+    print("tmux focus hooks removed (Ambient-managed only).")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="ambient",
@@ -600,6 +631,14 @@ def main():
         "focus-listener-run", help=argparse.SUPPRESS,
     )  # hidden launchd entry point
 
+    # v4 Phase 2 Unit 8: tmux pane/window focus hooks. Same focus-events.jsonl
+    # writer as Unit 7 but native tmux hooks instead of a daemon process.
+    subparsers.add_parser(
+        "tmux-focus-enable",
+        help="Install tmux focus hooks (opt-in capture; see docs/PRIVACY.md)",
+    )
+    subparsers.add_parser("tmux-focus-disable", help="Remove tmux focus hooks")
+
     args = parser.parse_args()
     config = Config()
 
@@ -624,6 +663,8 @@ def main():
         "focus-disable": cmd_focus_disable,
         "focus-status": cmd_focus_status,
         "focus-listener-run": cmd_focus_listener_run,
+        "tmux-focus-enable": cmd_tmux_focus_enable,
+        "tmux-focus-disable": cmd_tmux_focus_disable,
     }
 
     if args.command in commands:
