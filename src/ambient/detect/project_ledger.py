@@ -74,6 +74,7 @@ def detect_project_ledger(
     api_client=None,
     skip_summaries: bool = False,
     prompts: list[PromptRecord] | None = None,
+    attention_intervals: list[tuple[datetime, datetime]] | None = None,
 ) -> ProjectLedger:
     """Build a project ledger for the window.
 
@@ -95,7 +96,13 @@ def detect_project_ledger(
     truncate_chars = config.project_ledger_summary_truncate_chars
 
     # Time + session counts: reuse projects.detect_project_allocation.
-    allocations = detect_project_allocation(events, config).allocations
+    # When attention_intervals is provided (Phase 2 Unit 9 capture is on),
+    # the allocation flips to attention-weighted; ProjectLedger.time_basis
+    # below mirrors the underlying ProjectFindings.time_basis.
+    proj_findings = detect_project_allocation(
+        events, config, attention_intervals=attention_intervals
+    )
+    allocations = proj_findings.allocations
 
     # Per-project file frequency from event metadata.
     files_per_project = _aggregate_files(events, top_files_n)
@@ -139,7 +146,7 @@ def detect_project_ledger(
         entries=entries,
         window_start_iso=window_start.isoformat(),
         window_end_iso=window_end.isoformat(),
-        time_basis="command_span",
+        time_basis=proj_findings.time_basis,
     )
 
 

@@ -17,6 +17,9 @@ class DaemonState:
     last_claude_history_line: int = 0  # line number cursor for ~/.claude/history.jsonl (legacy)
     # Maps project slug -> {session_uuid: ingested_at_epoch_ms}
     processed_sessions: dict[str, dict[str, int]] = field(default_factory=dict)
+    # v4 Phase 2 Unit 9: cursor into ~/.ambient/focus-events.jsonl, ISO-8601 string.
+    # Empty string means "haven't read any yet"; the tick uses this to read only new events.
+    focus_events_cursor: str = ""
 
     @classmethod
     def load(cls, path: Path) -> "DaemonState":
@@ -48,6 +51,7 @@ class DaemonState:
                 last_weekly_summary_date=data.get("last_weekly_summary_date", ""),
                 last_claude_history_line=data.get("last_claude_history_line", 0),
                 processed_sessions=processed,
+                focus_events_cursor=data.get("focus_events_cursor", ""),
             )
         except (json.JSONDecodeError, KeyError, TypeError):
             return cls()

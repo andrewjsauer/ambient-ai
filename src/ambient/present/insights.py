@@ -23,6 +23,11 @@ from ambient.detect.coaching import (
 from ambient.detect.command_mix import CommandMixFindings, detect_command_mix
 from ambient.detect.compression import CompressionFindings, detect_compression
 from ambient.detect.correlator import CorrelationFindings, correlate_signals
+from ambient.detect.focus_events import (
+    compute_attention_intervals,
+    compute_context_switch_density,
+    read_focus_events,
+)
 from ambient.detect.freeform_fraction import (
     FreeformFraction,
     detect_freeform_fraction,
@@ -263,6 +268,23 @@ def _aggregate_window(
             default=[],
             label="phase1_walk",
         )
+        # v4 Phase 2 Unit 9: read focus events for the window. When focus
+        # capture is on, attention_intervals flips project_ledger time math
+        # from "command_span" to "attention_weighted" and gives the coaching
+        # layer a context-switch-density dimension. When focus capture is off
+        # (default), focus_events is empty and attention_intervals is None,
+        # so behavior is identical to Phase 1.
+        focus_events = _safe_run(
+            read_focus_events, config.focus_events_path,
+            since_iso=start.isoformat(),
+            default=[],
+            label="focus_events_read",
+        )
+        attention_intervals = (
+            compute_attention_intervals(focus_events, fallback_until=end)
+            if focus_events else None
+        )
+
         command_mix = _safe_run(
             detect_command_mix, config.claude_projects_dir, start, end, config,
             prompts=prompts,
@@ -277,7 +299,7 @@ def _aggregate_window(
         )
         project_ledger = _safe_run(
             detect_project_ledger, events, config.claude_projects_dir, start, end, config,
-            prompts=prompts,
+            prompts=prompts, attention_intervals=attention_intervals,
             default=None,
             label="project_ledger",
         )
