@@ -185,7 +185,7 @@ class TestInstall:
         responses = {
             "pane-focus-in": "pane-focus-in -> 'run-shell ambient-focus-hook.sh # ambient-managed'",
             "pane-focus-out": "pane-focus-out -> 'run-shell user-custom-thing'",  # NOT ambient
-            "window-focused": "window-focused -> 'run-shell ambient-focus-hook.sh # ambient-managed'",
+            "session-window-changed": "session-window-changed -> 'run-shell ambient-focus-hook.sh # ambient-managed'",
         }
         run_log = []
 
@@ -206,7 +206,7 @@ class TestInstall:
         unset_calls = [c for c in run_log if len(c) >= 3 and c[1:3] == ("set-hook", "-gu")]
         unset_hooks = [c[3] for c in unset_calls]
         assert "pane-focus-in" in unset_hooks
-        assert "window-focused" in unset_hooks
+        assert "session-window-changed" in unset_hooks
         assert "pane-focus-out" not in unset_hooks  # user-managed; not removed
 
 

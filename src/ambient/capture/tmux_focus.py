@@ -23,10 +23,12 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# tmux hooks we install. window-focused fires when the active window changes;
-# pane-focus-{in,out} fire when focus moves between panes within a window
-# (only when tmux's `focus-events` option is set on).
-HOOKS = ("pane-focus-in", "pane-focus-out", "window-focused")
+# tmux hooks we install. session-window-changed fires when the active window
+# changes within a session; pane-focus-{in,out} fire when focus moves between
+# panes within a window (only when tmux's `focus-events` option is set on).
+# Older docs and a draft of the plan referenced `window-focused`; that name
+# does not exist in tmux 3.x — `session-window-changed` is the correct hook.
+HOOKS = ("pane-focus-in", "pane-focus-out", "session-window-changed")
 
 SENTINEL = "# ambient-managed"
 
