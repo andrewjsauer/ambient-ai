@@ -729,6 +729,14 @@ def main():
     args = parser.parse_args()
     config = Config()
 
+    try:
+        from dotenv import load_dotenv
+
+        if config.dotenv_path.exists():
+            load_dotenv(config.dotenv_path)
+    except ImportError:
+        pass
+
     commands = {
         "start": cmd_start,
         "stop": cmd_stop,
