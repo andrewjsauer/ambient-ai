@@ -9,9 +9,11 @@ Ambient AI watches two things:
 1. **Your terminal** -- every command, exit code, and timing gap via zsh hooks
 2. **Your Claude Code sessions** -- prompts you type, tools Claude uses, errors, files touched
 
-It runs 7 detectors over this data and produces coaching output: daily summaries, weekly trend reports, on-demand insights, and installable recommendations (skills, aliases, CLAUDE.md rules).
+Optionally (strictly opt-in), it also captures focus signals: macOS app activations and tmux pane focus.
 
-The key differentiator is **resolution velocity tracking** -- Ambient AI is the only tool that sees the full debugging loop (shell failure -> Claude session -> fix attempt -> shell retry -> success) and measures how fast you resolve problems, where you get stuck, and what you should change.
+It runs 17 detectors over this data and produces coaching output: daily summaries, weekly trend reports, on-demand insights, and installable recommendations (skills, aliases, CLAUDE.md rules).
+
+The key differentiator is **resolution velocity tracking** -- Ambient AI sees the full debugging loop (shell failure -> Claude session -> fix attempt -> shell retry -> success) and measures how fast you resolve problems, where you get stuck, and what you should change.
 
 ## Architecture
 
@@ -19,9 +21,9 @@ The key differentiator is **resolution velocity tracking** -- Ambient AI is the 
 CAPTURE ──> DETECT ──> PRESENT
 ```
 
-**Capture** (zsh hooks + session parser) writes events to `~/.ambient/logs/events-YYYY-MM-DD.jsonl`.
+**Capture** (zsh hooks + session parser + optional focus listeners) writes events to `~/.ambient/logs/events-YYYY-MM-DD.jsonl`.
 
-**Detect** (7 algorithmic detectors, no LLM) produces structured findings:
+**Detect** (17 algorithmic detectors, no LLM) produces structured findings:
 
 | Detector | What it finds |
 |----------|--------------|
@@ -30,8 +32,18 @@ CAPTURE ──> DETECT ──> PRESENT
 | Changepoints | Workflow rhythm shifts (PELT algorithm) |
 | Projects | Per-project time allocation and context switches |
 | Prompt Patterns | Repeated Claude prompts (skill candidates) |
+| Correlator | Shell <-> Claude event linking (retry/success patterns) |
 | Coaching | Session outcomes: Productive, Friction, Quick, Abandoned + thrash scores |
 | Velocity | Resolution chains: fail -> Claude -> success, measured in active time |
+| Vectors | Stop-point activity vectors (what ended each stretch of work) |
+| Verification | Whether Claude-assisted changes were verified by a test/build run |
+| Git Activity | Commit cadence and scope per project |
+| Focus Events | Attention-weighted project time from focus signals (opt-in) |
+| Command Mix | Planning vs execution vs review command mix per project |
+| Freeform Fraction | Freeform prompts vs slash-command usage |
+| Slash Taxonomy | Slash-command intent classification (planning/execution/review/...) |
+| Project Ledger | Per-project activity ledger with LLM-drafted one-liners |
+| Project Capabilities | What each project can run (tests, builds, linters) |
 
 **Present** (Haiku/Sonnet synthesis) generates narratives:
 
@@ -44,6 +56,8 @@ CAPTURE ──> DETECT ──> PRESENT
 | Recommendations | Daily (daemon) | Haiku |
 | Stuck notifications | Real-time (daemon) | None (macOS native) |
 
+Mermaid diagrams of the full system live in [`docs/diagrams/`](docs/diagrams/).
+
 ## Quick Start
 
 ### Prerequisites
@@ -51,7 +65,7 @@ CAPTURE ──> DETECT ──> PRESENT
 - macOS (uses launchd for scheduling, osascript for notifications)
 - Python 3.10+
 - zsh (default macOS shell)
-- Anthropic API key
+- Anthropic API key (optional -- everything except LLM narration works without it)
 
 ### Install
 
@@ -62,6 +76,8 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
+
+An editable install from a clone is the supported mode -- the notification app and tmux hook script resolve paths relative to the repository.
 
 ### Configure
 
@@ -94,7 +110,7 @@ The daemon ticks every 30 minutes, ingesting sessions, running detectors, and ge
 
 ```bash
 ambient daemon-status   # should show "Daemon: running"
-ambient status          # shows today's event count
+ambient status          # daemon health, today's activity, suggested next steps
 ```
 
 ## CLI Commands
@@ -103,12 +119,13 @@ ambient status          # shows today's event count
 
 | Command | Description |
 |---------|-------------|
-| `ambient stats [--window MIN]` | Raw detector output (no LLM) |
+| `ambient stats [--window MIN]` | Raw detector output (no LLM); defaults to today |
 | `ambient analyze` | Run batch analysis with Haiku narration |
 | `ambient summary [--date DATE]` | Generate daily summary |
-| `ambient review [--date DATE]` | View saved daily summary |
+| `ambient review [DATE]` | View a saved daily summary (falls back to the most recent) |
 | `ambient insights [--window DAYS]` | Coaching report with velocity + stuck patterns |
 | `ambient projects [--window MIN \| --date DATE]` | Per-project time allocation |
+| `ambient vectors [--window DAYS] [--include-passive]` | Stop-point vector table (diagnostic) |
 
 ### Recommendations
 
@@ -125,13 +142,25 @@ ambient status          # shows today's event count
 | `ambient daemon-stop` | Unload launchd agent |
 | `ambient daemon-status` | Running status, cursors, lock |
 
+### Focus Capture (opt-in; see [docs/PRIVACY.md](docs/PRIVACY.md))
+
+| Command | Description |
+|---------|-------------|
+| `ambient focus-enable` | Enable the NSWorkspace app-activation listener |
+| `ambient focus-disable` | Disable the focus listener |
+| `ambient focus-status` | Show focus listener status |
+| `ambient tmux-focus-enable` | Install tmux pane/window focus hooks |
+| `ambient tmux-focus-disable` | Remove tmux focus hooks |
+
+Focus capture is off by default and records only app identity / pane identity and timestamps -- never window titles, paths, or content.
+
 ### Setup
 
 | Command | Description |
 |---------|-------------|
 | `ambient start` | Show setup instructions |
 | `ambient stop` | Show teardown instructions |
-| `ambient status` | Event count, calibration status |
+| `ambient status` | Daemon health, event counts, calibration status |
 | `ambient calibrate` | Fit GMM on accumulated data |
 
 ## Data Flow
@@ -139,14 +168,14 @@ ambient status          # shows today's event count
 ### Daemon Tick Cycle (every 30 minutes)
 
 1. Load API key from `~/.ambient/.env`
-2. Acquire PID-based lock (stale detection at 60 min)
+2. Acquire PID-based lock (stale detection at 60 min) -- before any mutating work
 3. Ingest completed Claude Code sessions (incremental -- tracks line counts for long-lived sessions)
 4. Read new events since last cursor
 5. Run detectors + Haiku batch analysis -> write to `analysis-YYYY-MM-DD.jsonl`
-6. Advance cursor atomically
-7. Check for missing daily summaries -> generate with Sonnet
+6. Advance cursor atomically (watermark on `ts_end`, so long-running commands are never skipped)
+7. Check for missing daily summaries -> generate with Sonnet (failed days retry next tick)
 8. Check coaching recommendations -> stage with quality gate
-9. Check weekly summary (Sundays) -> generate with coaching section
+9. Check weekly summary (Sundays, with overdue retry) -> generate with coaching section
 10. Auto-recalibrate GMM if eligible (7 days + 200 events)
 11. Release lock
 
@@ -160,8 +189,6 @@ Claude Code writes per-session JSONL files to `~/.claude/projects/<slug>/<uuid>.
 - Supports long-lived sessions that span hours or days
 
 ### Coaching System
-
-The coaching system (Tier 2.5) adds three signals on top of the base detectors:
 
 **Session Outcome Classification** -- Each Claude session is labeled using heuristic precedence:
 1. Quick (< 5 prompts, < 3 tool calls)
@@ -185,7 +212,7 @@ Two recommendation paths, both staged to `~/.ambient/recommendations/`:
 
 **Coaching recommendations** -- Quality-gated (3+ stuck episodes on same project, OR velocity > 2x average, OR pattern across 3+ sessions). Haiku drafts CLAUDE.md rules.
 
-Install with `ambient apply <id>` which copies skills to `~/.claude/commands/`.
+Install with `ambient apply <id>` which copies skills to `~/.claude/commands/`. Review the staged file before applying -- it was drafted by an LLM from your captured prompts.
 
 ## File Layout
 
@@ -196,6 +223,7 @@ Install with `ambient apply <id>` which copies skills to `~/.claude/commands/`.
   .env                              # ANTHROPIC_API_KEY (chmod 600)
   logs/
     events-YYYY-MM-DD.jsonl         # raw captured events
+  focus-events.jsonl                # opt-in focus events
   analysis/
     analysis-YYYY-MM-DD.jsonl       # batch detector findings
     summary-YYYY-MM-DD.md           # daily narrative
@@ -217,20 +245,14 @@ Install with `ambient apply <id>` which copies skills to `~/.claude/commands/`.
 
 ```
 src/ambient/
-  cli.py                            # 15 CLI commands
+  cli.py                            # CLI entry point (21 commands)
   config.py                         # all tunable parameters
   capture/
     hooks.zsh                       # zsh preexec/precmd hooks
     reader.py                       # Event dataclass + JSONL reader
-  detect/
-    compression.py                  # repeated command sequences
-    pauses.py                       # GMM pause classifier
-    changepoints.py                 # PELT rhythm detection
-    projects.py                     # per-project time allocation
-    prompt_patterns.py              # normalized prompt grouping
-    correlator.py                   # shell <-> Claude event linking
-    coaching.py                     # session outcomes + thrash scoring
-    velocity.py                     # resolution chain detection
+    nsworkspace_listener.py         # opt-in macOS app-activation listener
+    tmux_focus.py                   # opt-in tmux focus hooks
+  detect/                           # 17 detectors (see table above)
   present/
     api.py                          # Anthropic API wrapper
     narrator.py                     # batch/daily/weekly synthesis
@@ -245,6 +267,7 @@ src/ambient/
     lock.py                         # PID-based concurrency control
     launchd.py                      # macOS agent registration
     session_parser.py               # Claude session JSONL parser
+    focus_listener.py               # focus listener launchd management
 ```
 
 ## Configuration
@@ -286,6 +309,25 @@ Approximate daily costs with normal usage:
 - **Idle terminal:** Daemon ticks, finds no new events, exits in <1 second. No API calls.
 - **Long-lived Claude sessions:** Incremental ingestion picks up new content when the session goes idle for 30 minutes, even if the session has been open for hours.
 
+## Running Tests
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+The suite runs in under 30 seconds with no network access and no API key.
+
+## Uninstall
+
+```bash
+ambient daemon-stop                 # unload the launchd agent
+ambient focus-disable               # if focus capture was enabled
+ambient tmux-focus-disable          # if tmux hooks were installed
+# remove the `source .../hooks.zsh` and alias lines from ~/.zprofile or ~/.zshrc
+rm -rf ~/.ambient                   # delete all captured data
+```
+
 ## Dependencies
 
 - `anthropic` -- Claude API client
@@ -297,8 +339,14 @@ Approximate daily costs with normal usage:
 
 ## Privacy
 
-ambient-ai captures and processes sensitive personal data — command history, file paths, prompt text, focus events. The privacy contract is `docs/PRIVACY.md`. Every new capture unit must verify against specific clauses by number; some signal classes (raw keystrokes, clipboard contents, full URL history, system-wide event taps) are permanently closed under the policy.
+ambient-ai captures and processes sensitive personal data -- command history, file paths, prompt text, focus events. Everything stays on your machine under `~/.ambient/`; the Anthropic API is the only external boundary, and only aggregated detector findings cross it.
+
+The privacy contract is [`docs/PRIVACY.md`](docs/PRIVACY.md). Every new capture unit must verify against specific clauses by number; some signal classes (raw keystrokes, clipboard contents, full URL history, system-wide event taps) are permanently closed under the policy.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-Private repository.
+[Apache-2.0](LICENSE)

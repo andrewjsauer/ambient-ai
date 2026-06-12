@@ -33,7 +33,7 @@ The daemon is a macOS launchd user agent that invokes `ambient daemon-tick` ever
 
 When gates pass:
 
-0. **Ingest Claude sessions** -- Reads new entries from `~/.claude/history.jsonl`, groups them by sessionId, and appends completed sessions as `claude_session` events to the event stream. Uses a line-number cursor to avoid re-reading.
+0. **Ingest Claude sessions** -- Discovers per-session JSONL files under `~/.claude/projects/<slug>/`, parses each incrementally (a per-session line count in `state.json` tracks what was already read), and appends completed sessions as `claude_session` events to the event stream.
 1. **Analyze** -- Runs the full detection pipeline (compression + pause classification) on new events (commands + Claude sessions), sends findings to Claude Haiku, appends results to `analysis-YYYY-MM-DD.jsonl`
 2. **Update cursor** -- Advances the watermark to the latest command event's `ts_end + 1` (exclusive bound) so events are never double-processed. The watermark is `ts_end`-based because events are appended at command *completion*: a long-running command in flight at tick time lands later with an old `ts_start`, which a `ts_start` watermark would skip forever. Only command events feed the watermark — backfilled `claude_session` events carry old timestamps that would rewind it.
 3. **Save state** -- Persists cursor immediately after analysis (crash-safe)
@@ -63,12 +63,13 @@ launchd agents don't inherit shell environment variables. The daemon solves this
 
 ### Claude Code Session Capture
 
-The daemon reads `~/.claude/history.jsonl` on each tick to capture Claude Code session patterns. This fills the biggest blind spot — shell gaps during Claude sessions are no longer misclassified as "stuck."
+The daemon scans `~/.claude/projects/<slug>/<uuid>.jsonl` on each tick to capture Claude Code session patterns. This fills the biggest blind spot — shell gaps during Claude sessions are no longer misclassified as "stuck."
 
 **How it works:**
-- history.jsonl entries are grouped by sessionId
-- A session is "completed" when its latest entry is 30+ minutes old
-- Completed sessions are emitted as `claude_session` events into the same event stream
+- Claude Code writes one JSONL file per session under a per-project slug directory
+- A session is "completed" when its file hasn't been modified for 30+ minutes
+- Parsing is incremental: the daemon remembers each session's line count, so long-lived sessions that grow across hours or days are picked up portion by portion
+- Completed sessions (or new portions of them) are emitted as `claude_session` events into the same event stream
 - Each event includes: timestamps, project, prompt count, first 100 chars of each prompt
 - The pause classifier skips claude_session events (they don't have gaps)
 - The changepoint detector labels Claude-heavy segments as "claude-focused"
