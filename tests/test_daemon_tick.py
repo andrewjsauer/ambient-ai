@@ -101,7 +101,8 @@ class TestDaemonTick:
         daemon_tick(config)
         mock_analysis.assert_called_once()
         state = DaemonState.load(config.state_path)
-        assert state.last_analyzed_ts == now_ms - 3000 + 1  # exclusive cursor
+        # Exclusive cursor on the latest command's ts_end (+500ms duration)
+        assert state.last_analyzed_ts == (now_ms - 3000 + 500) + 1
 
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
     @patch("ambient.daemon.tick._run_analysis")
@@ -209,8 +210,8 @@ class TestCursorWatermark:
         ])
         daemon_tick(config)
         state = DaemonState.load(config.state_path)
-        # Cursor advances to recent command, not ancient session ts
-        assert state.last_analyzed_ts == (now_ms - 1000) + 1
+        # Cursor advances to recent command's ts_end, not ancient session ts
+        assert state.last_analyzed_ts == (now_ms - 1000 + 500) + 1
 
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
     @patch("ambient.daemon.tick._run_analysis")
@@ -247,7 +248,37 @@ class TestCursorWatermark:
         ])
         daemon_tick(config)
         state = DaemonState.load(config.state_path)
-        assert state.last_analyzed_ts == (now_ms - 2000) + 1
+        assert state.last_analyzed_ts == (now_ms - 2000 + 500) + 1
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("ambient.daemon.tick._run_analysis")
+    def test_long_running_command_not_skipped(self, mock_analysis, config):
+        """Regression: a command started before the cursor but finished after
+        it is appended at completion with an old ts_start. The ts_start
+        watermark dropped it forever; the ts_end watermark picks it up."""
+        mock_analysis.return_value = {"analysis": {}}
+        today = datetime.now().strftime("%Y-%m-%d")
+        now_ms = int(datetime.now().timestamp() * 1000)
+
+        # Tick 1: a quick command finishes; cursor advances past its ts_end.
+        _write_events(config, today, [_make_event(now_ms - 600_000)])
+        daemon_tick(config)
+        cursor = DaemonState.load(config.state_path).last_analyzed_ts
+        assert cursor == (now_ms - 600_000 + 500) + 1
+
+        # A long build that STARTED before that cursor finishes only now and
+        # is appended to the log with its old ts_start.
+        long_cmd = _make_event(now_ms - 900_000, command="make build")
+        long_cmd["ts_end"] = now_ms - 1000
+        long_cmd["duration_ms"] = long_cmd["ts_end"] - long_cmd["ts_start"]
+        _write_events(config, today, [long_cmd])
+
+        # Tick 2 must analyze it and advance the cursor past its ts_end.
+        daemon_tick(config)
+        assert mock_analysis.call_count == 2
+        second_batch = mock_analysis.call_args[0][1]
+        assert any(e.command == "make build" for e in second_batch)
+        assert DaemonState.load(config.state_path).last_analyzed_ts == (now_ms - 1000) + 1
 
 
 class TestSummaryCatchup:

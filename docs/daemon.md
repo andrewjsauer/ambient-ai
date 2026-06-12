@@ -26,8 +26,8 @@ The daemon is a macOS launchd user agent that invokes `ambient daemon-tick` ever
 ### Gate Sequence (cheapest check first)
 
 1. **API key** -- `load_dotenv(~/.ambient/.env)`, check `ANTHROPIC_API_KEY`. If missing, log and exit.
-2. **New events** -- Read events since the last cursor position. If none, skip analysis but still check for missing summaries.
-3. **Lock** -- Acquire PID-based lock file. If another tick is running, exit.
+2. **Lock** -- Acquire PID-based lock file. If another tick is running, exit. The lock comes before session ingestion because ingestion appends events and saves state — concurrent ticks would double-ingest.
+3. **New events** -- Read events since the last cursor position (after ingesting completed Claude sessions). If none, skip analysis but still check for missing summaries.
 
 ### What Each Tick Does
 
@@ -35,7 +35,7 @@ When gates pass:
 
 0. **Ingest Claude sessions** -- Reads new entries from `~/.claude/history.jsonl`, groups them by sessionId, and appends completed sessions as `claude_session` events to the event stream. Uses a line-number cursor to avoid re-reading.
 1. **Analyze** -- Runs the full detection pipeline (compression + pause classification) on new events (commands + Claude sessions), sends findings to Claude Haiku, appends results to `analysis-YYYY-MM-DD.jsonl`
-2. **Update cursor** -- Advances the watermark to `latest_event.ts_start + 1` (exclusive bound) so events are never double-processed
+2. **Update cursor** -- Advances the watermark to the latest command event's `ts_end + 1` (exclusive bound) so events are never double-processed. The watermark is `ts_end`-based because events are appended at command *completion*: a long-running command in flight at tick time lands later with an old `ts_start`, which a `ts_start` watermark would skip forever. Only command events feed the watermark — backfilled `claude_session` events carry old timestamps that would rewind it.
 3. **Save state** -- Persists cursor immediately after analysis (crash-safe)
 4. **Catch-up summaries** -- Scans from `last_summary_date` forward for any day with analysis data but no summary file. Generates missing summaries using the full pipeline (changepoint detection + Claude Sonnet). Handles weekends, vacations, and gaps of any length.
 5. **Recalibration check** -- If >=7 days since last calibration AND >=200 new events, re-fits the GMM pause classifier on all accumulated data

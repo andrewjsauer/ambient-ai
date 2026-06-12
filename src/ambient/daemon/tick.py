@@ -129,14 +129,25 @@ def _ingest_claude_sessions(config: Config, state: DaemonState) -> None:
 
 
 def _get_new_events(config: Config, state: DaemonState) -> list:
-    from ambient.capture.reader import read_events
+    from ambient.capture.reader import _date_range, read_events
 
     if state.last_analyzed_ts > 0:
         cursor_dt = datetime.fromtimestamp(state.last_analyzed_ts / 1000)
     else:
         cursor_dt = datetime.now() - timedelta(days=30)
 
-    return read_events(config, start=cursor_dt, end=datetime.now())
+    # Events are appended at command COMPLETION: a long-running command started
+    # before the cursor finishes later with ts_start < cursor, so the shared
+    # read_events start/end query (which filters on ts_start) would drop it
+    # forever. Read whole day files from the cursor's date through today and
+    # filter on ts_end here instead — ts_end is monotone with append order for
+    # the single zsh writer, so `ts_end >= cursor` is exactly "appended since
+    # the cursor was set". Shared reader semantics stay untouched for its
+    # other callers.
+    events = []
+    for ds in _date_range(cursor_dt, datetime.now()):
+        events.extend(read_events(config, date_str=ds))
+    return [e for e in events if e.ts_end >= state.last_analyzed_ts]
 
 
 def _run_analysis(config: Config, events: list, client=None) -> dict | None:
@@ -424,12 +435,15 @@ def daemon_tick(config: Config) -> None:
             logger.info("Analyzing %d events", len(events))
             _run_analysis(config, events, client=client)
 
-            # Update cursor (exclusive: +1 so boundary event isn't re-read).
+            # Update cursor (exclusive: +1 so the boundary event isn't re-read).
+            # Watermark on ts_end, not ts_start: events are written at command
+            # completion, so a command still running at tick time lands later
+            # with an old ts_start — a ts_start watermark skipped it forever.
             # Use only command events to compute the watermark: backfilled
-            # claude_session events carry ts_start from days ago, which would
+            # claude_session events carry timestamps from days ago, which would
             # rewind the cursor. The processed_sessions map already prevents
             # re-ingestion of those sessions on future ticks.
-            command_ts = [e.ts_start for e in events if e.type == "command"]
+            command_ts = [e.ts_end for e in events if e.type == "command"]
             if command_ts:
                 latest_ts = max(command_ts)
                 state.last_analyzed_ts = latest_ts + 1
