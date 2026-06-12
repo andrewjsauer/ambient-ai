@@ -98,7 +98,7 @@ def narrate_daily(
     config: Config,
     date_str: str | None = None,
     client=None,
-) -> str:
+) -> str | None:
     changepoint_dict = _findings_to_dict(changepoints) if changepoints else None
 
     # Trim oldest batch analyses if prompt would exceed budget
@@ -119,12 +119,12 @@ def narrate_daily(
         narrative = _call_api(config, DAILY_SYSTEM, prompt, config.sonnet_model,
                               max_tokens=3000, client=client)
     except Exception as e:
+        # Write nothing on failure: a placeholder at the canonical path would
+        # satisfy the daemon's summary_path.exists() gate (and could overwrite
+        # a previously generated good summary), permanently blocking the retry.
+        # Returning None lets the caller leave state unadvanced and retry.
         logger.error("Daily summary API call failed: %s", e)
-        narrative = (
-            f"# Daily Summary (API unavailable)\n\n"
-            f"API error: {e}\n\n"
-            f"Raw data: {len(batch_analyses)} batch analyses available.\n"
-        )
+        return None
 
     # Save summary
     config.ensure_dirs()
@@ -159,8 +159,10 @@ def narrate_weekly(
     date_str: str | None = None,
     coaching_data: dict | None = None,
     client=None,
-) -> str:
-    """Generate a weekly trend summary from multiple weeks of daily analysis data."""
+) -> str | None:
+    """Generate a weekly trend summary from multiple weeks of daily analysis data.
+
+    Returns the narrative on success, None on API failure (nothing written)."""
     # Trim oldest weeks if prompt would exceed budget
     trimmed_analyses = list(weekly_analyses)
     trimmed_labels = list(week_labels)
@@ -181,13 +183,10 @@ def narrate_weekly(
         narrative = _call_api(config, WEEKLY_SYSTEM, prompt, config.sonnet_model,
                               max_tokens=4000, client=client)
     except Exception as e:
+        # Same contract as narrate_daily: no placeholder, no state advance —
+        # the caller retries on a later tick.
         logger.error("Weekly summary API call failed: %s", e)
-        total_days = sum(len(w.get("days", [])) for w in weekly_analyses)
-        narrative = (
-            f"# Weekly Summary (API unavailable)\n\n"
-            f"API error: {e}\n\n"
-            f"Raw data: {len(weekly_analyses)} weeks, {total_days} days of data.\n"
-        )
+        return None
 
     config.ensure_dirs()
     if date_str is None:

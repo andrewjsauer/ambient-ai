@@ -275,6 +275,10 @@ def cmd_summary(config: Config, args):
 
     print(f"Generating daily summary for {date_str}...")
     narrative = narrate_daily(batch_analyses, changepoints, config, date_str=date_str)
+    if narrative is None:
+        print("Summary generation failed (API unavailable). Nothing was written; "
+              "re-run later or let the daemon retry.", file=sys.stderr)
+        sys.exit(1)
     print(f"\n{narrative}")
     print(f"\nSaved to: {config.summary_path(date_str)}")
 

@@ -191,6 +191,27 @@ def test_narrate_daily_respects_date_param(mock_api, config):
 
 
 @patch("ambient.present.narrator._call_api")
+def test_narrate_daily_api_failure_writes_nothing(mock_api, config):
+    """API failure returns None and writes no file — a placeholder would
+    satisfy the daemon's exists() gate and block the retry forever."""
+    mock_api.side_effect = Exception("API down")
+    result = narrate_daily([{"summary": "w1"}], None, config, date_str="2026-06-01")
+    assert result is None
+    assert not config.summary_path("2026-06-01").exists()
+
+
+@patch("ambient.present.narrator._call_api")
+def test_narrate_daily_failure_preserves_existing_summary(mock_api, config):
+    """Re-running during an outage must not clobber a good summary."""
+    config.ensure_dirs()
+    config.summary_path("2026-06-01").write_text("# Real summary")
+    mock_api.side_effect = Exception("API down")
+    result = narrate_daily([{"summary": "w1"}], None, config, date_str="2026-06-01")
+    assert result is None
+    assert config.summary_path("2026-06-01").read_text() == "# Real summary"
+
+
+@patch("ambient.present.narrator._call_api")
 def test_narrate_daily_trims_when_over_budget(mock_api, config):
     """When batch analyses exceed budget, oldest are dropped."""
     mock_api.return_value = "trimmed summary"

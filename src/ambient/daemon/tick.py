@@ -217,7 +217,17 @@ def _check_summaries(config: Config, state: DaemonState, client=None) -> None:
                 events = read_events(config, date_str=date_str)
                 pause_result = classify(events, config)
                 changepoints = detect_changepoints(events, config, pause_result)
-                narrate_daily(batch_analyses, changepoints, config, date_str=date_str, client=client)
+                narrative = narrate_daily(batch_analyses, changepoints, config,
+                                          date_str=date_str, client=client)
+                if narrative is None:
+                    # Stop the catch-up at the first failed day: a later
+                    # success in the same loop would advance last_summary_date
+                    # past this day and orphan it forever.
+                    logger.warning(
+                        "Summary generation failed for %s; will retry next tick",
+                        date_str,
+                    )
+                    return
                 state.last_summary_date = date_str
                 state.save(config.state_path)
 
@@ -250,18 +260,23 @@ def _check_summaries(config: Config, state: DaemonState, client=None) -> None:
 def _check_weekly_summary(config: Config, state: DaemonState, client=None) -> None:
     today = datetime.now()
 
-    # Only run on Sunday
-    if today.weekday() != 6:
-        return
-
-    today_str = today.strftime("%Y-%m-%d")
-
-    # Check if already generated this week
+    days_since = None
     if state.last_weekly_summary_date:
         last_weekly = datetime.strptime(state.last_weekly_summary_date, "%Y-%m-%d").date()
         days_since = (today.date() - last_weekly).days
-        if days_since < 7:
+
+    if today.weekday() == 6:
+        # Sunday: generate unless this week's summary already landed.
+        if days_since is not None and days_since < 7:
             return
+    else:
+        # Non-Sunday: fire only as an overdue retry — every tick on a failing
+        # Sunday returns without advancing state, so an 8+ day gap means the
+        # week's summary was never generated and would otherwise be lost.
+        if days_since is None or days_since < 8:
+            return
+
+    today_str = today.strftime("%Y-%m-%d")
 
     # Gather analysis files for current + previous weeks
     from ambient.present.narrator import load_batch_analyses, narrate_weekly
@@ -347,8 +362,11 @@ def _check_weekly_summary(config: Config, state: DaemonState, client=None) -> No
         logger.error("Weekly coaching analysis failed: %s", e)
 
     logger.info("Generating weekly summary for %s", today_str)
-    narrate_weekly(weekly_analyses, week_labels, config, date_str=today_str,
-                   coaching_data=coaching_data, client=client)
+    narrative = narrate_weekly(weekly_analyses, week_labels, config, date_str=today_str,
+                               coaching_data=coaching_data, client=client)
+    if narrative is None:
+        logger.warning("Weekly summary generation failed; will retry on a later tick")
+        return
     state.last_weekly_summary_date = today_str
 
 

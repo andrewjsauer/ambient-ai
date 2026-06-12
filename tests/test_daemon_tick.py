@@ -281,6 +281,51 @@ class TestCursorWatermark:
         assert DaemonState.load(config.state_path).last_analyzed_ts == (now_ms - 1000) + 1
 
 
+class TestSummaryRetry:
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("ambient.present.narrator._call_api")
+    def test_failed_summary_retries_next_tick(self, mock_api, config):
+        """End-to-end retry: outage tick writes nothing and leaves state
+        unadvanced; the next healthy tick generates the real summary."""
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        _write_analysis(config, yesterday)
+
+        mock_api.side_effect = Exception("transient outage")
+        daemon_tick(config)
+        assert not config.summary_path(yesterday).exists()
+        assert DaemonState.load(config.state_path).last_summary_date == ""
+
+        mock_api.side_effect = None
+        mock_api.return_value = "recovered summary"
+        daemon_tick(config)
+        assert config.summary_path(yesterday).exists()
+        assert "recovered summary" in config.summary_path(yesterday).read_text()
+        assert DaemonState.load(config.state_path).last_summary_date == yesterday
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("ambient.present.narrator._call_api")
+    def test_failed_day_blocks_advance_past_it(self, mock_api, config):
+        """The catch-up loop stops at the first failed day: a later success in
+        the same tick must not advance last_summary_date past the failure."""
+        d1 = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+        d2 = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+        _write_analysis(config, d1)
+        _write_analysis(config, d2)
+
+        mock_api.side_effect = Exception("outage")
+        daemon_tick(config)
+        assert not config.summary_path(d1).exists()
+        assert not config.summary_path(d2).exists()
+        assert DaemonState.load(config.state_path).last_summary_date == ""
+
+        mock_api.side_effect = None
+        mock_api.return_value = "ok"
+        daemon_tick(config)
+        assert config.summary_path(d1).exists()
+        assert config.summary_path(d2).exists()
+        assert DaemonState.load(config.state_path).last_summary_date == d2
+
+
 class TestSummaryCatchup:
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
     @patch("ambient.daemon.tick._run_analysis")

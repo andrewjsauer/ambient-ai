@@ -181,7 +181,8 @@ def test_narrate_weekly_only_one_week(mock_api, config, caplog):
 
 @patch("ambient.present.narrator._call_api")
 def test_narrate_weekly_api_failure(mock_api, config):
-    """API failure produces fallback narrative, doesn't crash."""
+    """API failure returns None and writes nothing — a placeholder at the
+    canonical path would satisfy the daemon's gate and block the retry."""
     mock_api.side_effect = Exception("API quota exceeded")
 
     weekly_analyses = [
@@ -191,8 +192,49 @@ def test_narrate_weekly_api_failure(mock_api, config):
     week_labels = ["Current week", "Week -1"]
 
     result = narrate_weekly(weekly_analyses, week_labels, config, date_str="2026-04-06")
-    assert "API unavailable" in result
-    assert "2 weeks" in result
+    assert result is None
+    assert not config.weekly_summary_path("2026-04-06").exists()
+
+
+@patch("ambient.present.narrator._call_api")
+def test_check_weekly_summary_failure_does_not_advance(mock_api, config):
+    """A failed Sunday generation leaves last_weekly_summary_date unset."""
+    from ambient.daemon.state import DaemonState
+    from ambient.daemon.tick import _check_weekly_summary
+
+    mock_api.side_effect = Exception("outage")
+    state = DaemonState()
+    _write_analysis(config, "2026-04-01")  # current week (Mar 30 - Apr 5)
+    _write_analysis(config, "2026-03-25")  # week -1
+
+    with patch("ambient.daemon.tick.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 4, 5, 12, 0)  # Sunday
+        mock_dt.strptime = datetime.strptime
+        _check_weekly_summary(config, state)
+
+    assert state.last_weekly_summary_date == ""
+    assert not config.weekly_summary_path("2026-04-05").exists()
+
+
+@patch("ambient.present.narrator._call_api")
+def test_check_weekly_summary_overdue_retry_after_sunday(mock_api, config):
+    """A weekly summary lost to a Sunday outage is regenerated on the next
+    tick once the last success is 8+ days old, even on a Monday."""
+    from ambient.daemon.state import DaemonState
+    from ambient.daemon.tick import _check_weekly_summary
+
+    mock_api.return_value = "recovered weekly narrative"
+    # Last success was the PREVIOUS Sunday; this week's Sunday (Apr 5) failed.
+    state = DaemonState(last_weekly_summary_date="2026-03-29")
+    _write_analysis(config, "2026-04-01")
+    _write_analysis(config, "2026-03-25")
+
+    with patch("ambient.daemon.tick.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 4, 6, 12, 0)  # Monday, 8 days after
+        mock_dt.strptime = datetime.strptime
+        _check_weekly_summary(config, state)
+
+    assert state.last_weekly_summary_date == "2026-04-06"
     assert config.weekly_summary_path("2026-04-06").exists()
 
 
