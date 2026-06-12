@@ -396,24 +396,27 @@ def daemon_tick(config: Config) -> None:
         client = None
         logger.warning("anthropic package not installed, API calls will create individual clients")
 
-    # Load state
-    state = DaemonState.load(config.state_path)
-
-    # Ingest Claude Code sessions from history.jsonl
-    try:
-        _ingest_claude_sessions(config, state)
-    except Exception as e:
-        logger.error("Claude history ingestion failed: %s", e)
-
-    # Gate 2: New events (now includes any claude_session events just ingested)
-    events = _get_new_events(config, state)
-
-    # Gate 3: Lock (acquire before any work, including summary catch-up)
+    # Gate 2: Lock. Acquired before ANY mutating work — session ingestion
+    # appends to events files and saves state, so a concurrent tick running
+    # ingestion outside the lock would double-ingest the same sessions
+    # (docs/daemon.md: "All operations ... run inside the lock").
     if not acquire_lock(config.lock_path):
         logger.info("Lock held by another process, skipping")
         return
 
     try:
+        # Load state
+        state = DaemonState.load(config.state_path)
+
+        # Ingest completed Claude Code session files from ~/.claude/projects/
+        try:
+            _ingest_claude_sessions(config, state)
+        except Exception as e:
+            logger.error("Claude session ingestion failed: %s", e)
+
+        # Gate 3: New events (now includes any claude_session events just ingested)
+        events = _get_new_events(config, state)
+
         if not events:
             logger.info("No new events since cursor, skipping analysis")
         else:

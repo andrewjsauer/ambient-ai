@@ -146,6 +146,25 @@ class TestDaemonTick:
         assert state.last_analyzed_ts == 0
 
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("ambient.daemon.tick._ingest_claude_sessions")
+    @patch("ambient.daemon.tick.acquire_lock", return_value=False)
+    def test_no_ingestion_when_locked(self, mock_lock, mock_ingest, config):
+        """Regression: ingestion appends events and saves state, so it must not
+        run while another tick holds the lock. Pre-fix, ingestion ran before
+        lock acquisition and concurrent ticks double-ingested sessions."""
+        daemon_tick(config)
+        mock_ingest.assert_not_called()
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("ambient.daemon.tick._ingest_claude_sessions", side_effect=Exception("boom"))
+    def test_lock_released_when_ingestion_fails(self, mock_ingest, config):
+        """Ingestion failures are logged, the tick continues, and the lock is
+        released on the way out."""
+        daemon_tick(config)
+        mock_ingest.assert_called_once()
+        assert not config.lock_path.exists()
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
     @patch("ambient.daemon.tick._run_analysis", side_effect=Exception("API error"))
     def test_releases_lock_on_error(self, mock_analysis, config):
         today = datetime.now().strftime("%Y-%m-%d")
