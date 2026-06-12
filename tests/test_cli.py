@@ -61,8 +61,9 @@ def test_status_no_data(config):
         cmd_status(config, type("Args", (), {})())
 
     output = f.getvalue()
-    assert "No events captured yet" in output
-    assert "Not calibrated" in output
+    assert "Ambient" in output
+    assert "no events yet" in output
+    assert "GMM uncalibrated" in output
 
 
 def test_status_with_data(config):
@@ -79,7 +80,8 @@ def test_status_with_data(config):
         cmd_status(config, type("Args", (), {})())
 
     output = f.getvalue()
-    assert "Events today: 20" in output
+    assert "20 events" in output
+    assert "Ambient" in output
 
 
 def test_review_no_summary(config):
@@ -87,7 +89,8 @@ def test_review_no_summary(config):
     import io
     from contextlib import redirect_stdout
 
-    args = type("Args", (), {"date": "2026-03-30"})()
+    # No summaries on disk at all → cmd_review must say so without crashing.
+    args = type("Args", (), {"date": "2026-03-30", "date_positional": None})()
 
     f = io.StringIO()
     with redirect_stdout(f):
@@ -96,19 +99,53 @@ def test_review_no_summary(config):
     assert "No summary" in f.getvalue()
 
 
+def test_review_falls_back_to_most_recent(config):
+    """When the requested date is missing but earlier summaries exist, show the most recent."""
+    from ambient.cli import cmd_review
+    import io
+    from contextlib import redirect_stdout
+
+    config.summary_path("2026-03-25").write_text("# Older day\nFallback content.")
+    args = type("Args", (), {"date": "2026-03-30", "date_positional": None})()
+
+    f = io.StringIO()
+    with redirect_stdout(f):
+        cmd_review(config, args)
+
+    output = f.getvalue()
+    assert "showing most recent" in output
+    assert "Fallback content" in output
+
+
 def test_review_with_summary(config):
     from ambient.cli import cmd_review
     import io
     from contextlib import redirect_stdout
 
     config.summary_path("2026-03-30").write_text("# Great day\nYou were productive.")
-    args = type("Args", (), {"date": "2026-03-30"})()
+    args = type("Args", (), {"date": "2026-03-30", "date_positional": None})()
 
     f = io.StringIO()
     with redirect_stdout(f):
         cmd_review(config, args)
 
     assert "Great day" in f.getvalue()
+
+
+def test_review_accepts_positional_date(config):
+    """`ambient review 2026-03-30` should work without --date."""
+    from ambient.cli import cmd_review
+    import io
+    from contextlib import redirect_stdout
+
+    config.summary_path("2026-03-30").write_text("# Positional works")
+    args = type("Args", (), {"date": None, "date_positional": "2026-03-30"})()
+
+    f = io.StringIO()
+    with redirect_stdout(f):
+        cmd_review(config, args)
+
+    assert "Positional works" in f.getvalue()
 
 
 # --- Unit 8: recommendations and apply ---

@@ -9,6 +9,15 @@ from ambient.config import Config
 NOISE_PATTERNS = frozenset({"clear", "yes", "ok", "y", "n", "no", "q", "exit", "quit"})
 MIN_PROMPT_LENGTH = 3
 
+# Substrings (lowercased) that mark a prompt as Claude-Code chrome rather than
+# user intent — these should never seed a "skill" recommendation.
+_CHROME_SUBSTRINGS = (
+    "[request interrupted by user]",
+    "request interrupted by user",
+    "api error",
+    "(no content)",
+)
+
 # Regex to strip file paths like /foo/bar.py or ./src/thing.ts
 _FILE_PATH_RE = re.compile(r"[./]?/[\w./-]+\.\w+")
 
@@ -49,7 +58,10 @@ def _is_noise(prompt: str) -> bool:
     stripped = prompt.strip()
     if len(stripped) < MIN_PROMPT_LENGTH:
         return True
-    if stripped.lower() in NOISE_PATTERNS:
+    lower = stripped.lower()
+    if lower in NOISE_PATTERNS:
+        return True
+    if any(marker in lower for marker in _CHROME_SUBSTRINGS):
         return True
     return False
 

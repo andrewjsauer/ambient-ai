@@ -177,9 +177,16 @@ def _get_sequences(compression_findings) -> list[dict]:
 
 def _generate_skill_recommendation(pattern: dict, config: Config, client=None) -> Recommendation | None:
     """Generate a skill recommendation from a repeated prompt pattern."""
-    normalized = pattern["normalized_prompt"]
+    normalized = (pattern["normalized_prompt"] or "").strip()
     examples = pattern.get("raw_examples", [])[:3]
     count = pattern["count"]
+
+    # Skip empty / chrome / interrupt patterns that slipped past noise filters.
+    if not normalized or len(normalized) < 3:
+        return None
+    lower = normalized.lower()
+    if "interrupted by user" in lower or "api error" in lower:
+        return None
 
     prompt = f"""A developer repeatedly types this kind of prompt in Claude Code ({count} times):
 

@@ -131,6 +131,7 @@ class TestInstall:
     def test_install_runs_set_hook_per_hook(self, tmp_path):
         with patch.object(tmux_focus, "tmux_available", return_value=True), \
              patch.object(tmux_focus, "uninstall_hooks") as mock_uninstall, \
+             patch.object(tmux_focus, "_save_and_enable_focus_events") as mock_save, \
              patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
                 args=[], returncode=0, stdout="", stderr=""
@@ -138,6 +139,8 @@ class TestInstall:
             tmux_focus.install_hooks(tmp_path / "events.jsonl")
             # uninstall is called once at the start (idempotency)
             mock_uninstall.assert_called_once()
+            # focus-events save/enable is invoked once per install
+            mock_save.assert_called_once()
             # one set-hook call per hook in HOOKS
             assert mock_run.call_count == len(tmux_focus.HOOKS)
             seen_hooks = set()
@@ -163,6 +166,7 @@ class TestInstall:
         weird_path = tmp_path / 'has "quote and $dollar.jsonl'
         with patch.object(tmux_focus, "tmux_available", return_value=True), \
              patch.object(tmux_focus, "uninstall_hooks"), \
+             patch.object(tmux_focus, "_save_and_enable_focus_events"), \
              patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
                 args=[], returncode=0, stdout="", stderr=""
@@ -208,6 +212,96 @@ class TestInstall:
         assert "pane-focus-in" in unset_hooks
         assert "session-window-changed" in unset_hooks
         assert "pane-focus-out" not in unset_hooks  # user-managed; not removed
+
+
+class TestFocusEventsLifecycle:
+    """install_hooks must enable `focus-events` (otherwise pane-focus-{in,out}
+    don't fire), and uninstall_hooks must restore whatever value the user had
+    before. State lives in a tmux user option so we don't write to dotfiles.
+    """
+
+    def test_save_and_enable_records_prior_off_then_sets_on(self):
+        run_log = []
+
+        def fake_run(cmd, *a, **kw):
+            run_log.append(tuple(cmd))
+            if cmd[1:4] == ["show-options", "-gv", tmux_focus.PRIOR_FOCUS_EVENTS_OPT]:
+                # No saved value yet — emulate tmux exit-code 1 for unset @-options.
+                return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
+            if cmd[1:4] == ["show-options", "-gv", "focus-events"]:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="off\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            tmux_focus._save_and_enable_focus_events()
+
+        assert ("tmux", "set-option", "-g", tmux_focus.PRIOR_FOCUS_EVENTS_OPT, "off") in run_log
+        assert ("tmux", "set-option", "-g", "focus-events", "on") in run_log
+
+    def test_save_and_enable_preserves_already_saved_prior(self):
+        # Re-running enable must not clobber an earlier saved prior with our own "on".
+        run_log = []
+
+        def fake_run(cmd, *a, **kw):
+            run_log.append(tuple(cmd))
+            if cmd[1:4] == ["show-options", "-gv", tmux_focus.PRIOR_FOCUS_EVENTS_OPT]:
+                # Prior already saved as "off" from a previous install.
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="off\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            tmux_focus._save_and_enable_focus_events()
+
+        # No re-save happened; only the focus-events on flip.
+        save_calls = [c for c in run_log
+                      if c[:2] == ("tmux", "set-option") and tmux_focus.PRIOR_FOCUS_EVENTS_OPT in c]
+        assert save_calls == []
+        assert ("tmux", "set-option", "-g", "focus-events", "on") in run_log
+
+    def test_restore_resets_focus_events_and_unsets_saved_prior(self):
+        run_log = []
+
+        def fake_run(cmd, *a, **kw):
+            run_log.append(tuple(cmd))
+            if cmd[1:4] == ["show-options", "-gv", tmux_focus.PRIOR_FOCUS_EVENTS_OPT]:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="off\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            tmux_focus._restore_focus_events()
+
+        assert ("tmux", "set-option", "-g", "focus-events", "off") in run_log
+        assert ("tmux", "set-option", "-gu", tmux_focus.PRIOR_FOCUS_EVENTS_OPT) in run_log
+
+    def test_restore_is_noop_when_no_prior_saved(self):
+        run_log = []
+
+        def fake_run(cmd, *a, **kw):
+            run_log.append(tuple(cmd))
+            # Emulate tmux returning non-zero for an unset user option.
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            tmux_focus._restore_focus_events()
+
+        # Only the show-options probe ran; no set-option mutation.
+        assert all("set-option" not in c for c in run_log)
+
+    def test_restore_preserves_user_prior_on(self):
+        # If the user had focus-events ON before installing, uninstall should
+        # leave it ON — not blanket-disable it.
+        run_log = []
+
+        def fake_run(cmd, *a, **kw):
+            run_log.append(tuple(cmd))
+            if cmd[1:4] == ["show-options", "-gv", tmux_focus.PRIOR_FOCUS_EVENTS_OPT]:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="on\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            tmux_focus._restore_focus_events()
+
+        assert ("tmux", "set-option", "-g", "focus-events", "on") in run_log
 
 
 class TestHookScriptPath:

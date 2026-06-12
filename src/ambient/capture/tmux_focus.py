@@ -32,6 +32,59 @@ HOOKS = ("pane-focus-in", "pane-focus-out", "session-window-changed")
 
 SENTINEL = "# ambient-managed"
 
+# tmux user-option slot where we stash the user's prior `focus-events` value.
+# pane-focus-{in,out} hooks only fire when `focus-events` is on, so install
+# flips it on; uninstall restores whatever was there before so we don't leak
+# state out of ambient's footprint.
+PRIOR_FOCUS_EVENTS_OPT = "@ambient-prior-focus-events"
+
+
+def _save_and_enable_focus_events() -> None:
+    """Save the current `focus-events` value into a tmux user option, then
+    set `focus-events on`. Idempotent: re-running won't overwrite the saved
+    prior with our own ``on``.
+    """
+    saved = subprocess.run(
+        ["tmux", "show-options", "-gv", PRIOR_FOCUS_EVENTS_OPT],
+        capture_output=True, text=True,
+    )
+    if saved.returncode != 0 or not saved.stdout.strip():
+        cur = subprocess.run(
+            ["tmux", "show-options", "-gv", "focus-events"],
+            capture_output=True, text=True,
+        )
+        prior = cur.stdout.strip() if cur.returncode == 0 and cur.stdout.strip() else "off"
+        subprocess.run(
+            ["tmux", "set-option", "-g", PRIOR_FOCUS_EVENTS_OPT, prior],
+            check=True,
+        )
+    subprocess.run(
+        ["tmux", "set-option", "-g", "focus-events", "on"],
+        check=True,
+    )
+
+
+def _restore_focus_events() -> None:
+    """Restore `focus-events` to whatever it was before install_hooks ran.
+    No-op if no prior value was saved (uninstall called without a matching
+    install, or the prior value was already restored).
+    """
+    saved = subprocess.run(
+        ["tmux", "show-options", "-gv", PRIOR_FOCUS_EVENTS_OPT],
+        capture_output=True, text=True,
+    )
+    if saved.returncode != 0 or not saved.stdout.strip():
+        return
+    prior = saved.stdout.strip()
+    subprocess.run(
+        ["tmux", "set-option", "-g", "focus-events", prior],
+        capture_output=True,
+    )
+    subprocess.run(
+        ["tmux", "set-option", "-gu", PRIOR_FOCUS_EVENTS_OPT],
+        capture_output=True,
+    )
+
 
 def hook_script_path() -> Path:
     """Locate the shell hook script. Resolved relative to the package root."""
@@ -77,6 +130,10 @@ def install_hooks(focus_events_path: Path) -> None:
     # is sentinel-aware so it leaves user-managed hooks alone.
     uninstall_hooks()
 
+    # pane-focus-{in,out} only fire with `focus-events on`; flip it on now and
+    # remember the user's prior value so uninstall can restore it.
+    _save_and_enable_focus_events()
+
     quoted_path = shlex.quote(str(focus_events_path))
     quoted_script = shlex.quote(str(script))
 
@@ -120,6 +177,8 @@ def uninstall_hooks() -> None:
             ["tmux", "set-hook", "-gu", hook],
             capture_output=True,
         )
+    # Restore focus-events to whatever the user had before install ran.
+    _restore_focus_events()
 
 
 def is_installed() -> bool:

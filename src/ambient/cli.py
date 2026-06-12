@@ -35,43 +35,105 @@ def cmd_stop(config: Config, args):
 
 
 def cmd_status(config: Config, args):
+    from ambient.capture.reader import read_events_today
+    from ambient.daemon.launchd import is_agent_loaded
+    from ambient.daemon.lock import is_locked
+    from ambient.daemon.state import DaemonState
+
     date_str = datetime.now().strftime("%Y-%m-%d")
-    events_path = config.events_path(date_str)
 
-    if events_path.exists():
-        lines = 0
-        last_line = None
-        with open(events_path) as f:
-            for line in f:
-                if line.strip():
-                    lines += 1
-                    last_line = line
-        if last_line:
-            try:
-                last_event = json.loads(last_line)
-                last_ts = last_event.get("ts_end", 0)
-                last_time = datetime.fromtimestamp(last_ts / 1000).strftime("%H:%M:%S")
-            except (json.JSONDecodeError, KeyError):
-                last_time = "unknown"
-        else:
-            last_time = "unknown"
-        print(f"Events today: {lines}")
-        print(f"Last event: {last_time}")
-    else:
-        print("No events captured yet.")
+    # Section 1: daemon health
+    daemon_loaded = is_agent_loaded()
+    state = DaemonState.load(config.state_path)
+    last_tick = (
+        datetime.fromtimestamp(state.last_analyzed_ts / 1000).strftime("%H:%M")
+        if state.last_analyzed_ts > 0
+        else "never"
+    )
+    locked, _ = is_locked(config.lock_path)
+    gmm_label = "calibrated" if config.gmm_model_path.exists() else "uncalibrated"
 
-    # GMM status
-    if config.gmm_model_path.exists():
-        print("GMM: Calibrated")
-    else:
-        print("GMM: Not calibrated (run 'ambient calibrate')")
+    print(f"Ambient · {date_str}")
+    print("─" * 50)
+    print(
+        f"Daemon       {'running' if daemon_loaded else 'stopped'} · "
+        f"last tick {last_tick} · "
+        f"lock {'held' if locked else 'free'} · "
+        f"GMM {gmm_label}"
+    )
 
-    # Last analysis
-    analysis_path = config.analysis_path(date_str)
-    if analysis_path.exists():
-        print(f"Analysis: {analysis_path}")
+    # Section 2: today
+    events = read_events_today(config)
+    if events:
+        last_event_ts = max(e.ts_end for e in events)
+        last_event_str = datetime.fromtimestamp(last_event_ts / 1000).strftime("%H:%M")
+        claude_count = sum(1 for e in events if e.type == "claude_session")
+        # Lightweight project mix (no API)
+        try:
+            from ambient.detect.projects import detect_project_allocation
+            alloc = detect_project_allocation(events, config)
+            top_projects = []
+            for a in alloc.allocations[:3]:
+                minutes = a.total_ms / 1000 / 60
+                if minutes >= 60:
+                    top_projects.append(f"{a.project} ({minutes / 60:.1f}h)")
+                else:
+                    top_projects.append(f"{a.project} ({minutes:.0f}m)")
+            project_line = ", ".join(top_projects) if top_projects else "—"
+        except Exception:
+            project_line = "—"
+        print(
+            f"Today        {len(events)} events · "
+            f"{claude_count} claude session(s) · "
+            f"last activity {last_event_str}"
+        )
+        print(f"Projects     {project_line}")
     else:
-        print("Analysis: None today")
+        print("Today        no events yet")
+
+    # Section 3: artifacts
+    summary_today = config.summary_path(date_str).exists()
+    latest = _most_recent_summary(config)
+    latest_label = latest[0] if latest else "none"
+    rec_count = _pending_rec_count(config)
+    print(
+        f"Summary      today {'✓' if summary_today else '—'} · "
+        f"latest {latest_label} · "
+        f"pending recs {rec_count}"
+    )
+
+    # Section 4: next steps
+    suggestions = []
+    if not daemon_loaded:
+        suggestions.append("ambient daemon-start")
+    if not config.gmm_model_path.exists():
+        suggestions.append("ambient calibrate")
+    if latest:
+        suggestions.append(f"ambient review{'' if summary_today else f' {latest[0]}'}")
+    suggestions.append("ambient insights")
+    print(f"Try          {' · '.join(suggestions)}")
+
+
+def _pending_rec_count(config: Config) -> int:
+    from ambient.present.recommender import parse_recommendation_frontmatter
+
+    rec_dir = config.recommendations_dir
+    if not rec_dir.exists():
+        return 0
+    count = 0
+    for f in rec_dir.glob("*.md"):
+        try:
+            meta = parse_recommendation_frontmatter(f.read_text())
+        except Exception:
+            continue
+        title = (meta.get("title") or "").strip()
+        if not title or title in ("Skill:", "Skill: "):
+            continue
+        lower = title.lower()
+        if "interrupted by user" in lower or "api error" in lower:
+            continue
+        count += 1
+    return count
 
 
 def cmd_stats(config: Config, args):
@@ -80,15 +142,19 @@ def cmd_stats(config: Config, args):
     from ambient.detect.pauses import classify
     from ambient.detect.changepoints import detect_changepoints
 
-    window = args.window if hasattr(args, "window") and args.window else config.default_window_minutes
-
-    # Compression and pause on window
-    events = read_events_window(config, window)
+    # Default to today; `--window N` narrows to the last N minutes.
+    explicit_window = getattr(args, "window", None)
+    if explicit_window:
+        events = read_events_window(config, explicit_window)
+        scope_label = f"last {explicit_window} minutes"
+    else:
+        events = read_events_today(config)
+        scope_label = "today"
     if not events:
-        print(f"No events in the last {window} minutes.")
+        print(f"No events for {scope_label}.")
         return
 
-    print(f"=== Stats for last {window} minutes ({len(events)} events) ===\n")
+    print(f"=== Stats for {scope_label} ({len(events)} events) ===\n")
 
     # Compression
     compression = detect_compression(events, config)
@@ -214,13 +280,47 @@ def cmd_summary(config: Config, args):
 
 
 def cmd_review(config: Config, args):
-    date_str = args.date if hasattr(args, "date") and args.date else datetime.now().strftime("%Y-%m-%d")
-    summary_path = config.summary_path(date_str)
+    # Accept either positional `date` or `--date YYYY-MM-DD`.
+    explicit_date = (
+        getattr(args, "date_positional", None) or getattr(args, "date", None)
+    )
+    requested_date = explicit_date or datetime.now().strftime("%Y-%m-%d")
+    summary_path = config.summary_path(requested_date)
 
     if summary_path.exists():
         print(summary_path.read_text())
+        return
+
+    # Fallback: show the most recent summary so `ambient review` never dead-ends.
+    fallback = _most_recent_summary(config, before=requested_date)
+    if fallback is None:
+        print(f"No summary for {requested_date} and no prior summaries found.")
+        print("Run 'ambient summary' (after some Claude/terminal activity) to generate one.")
+        return
+
+    fallback_date, fallback_path = fallback
+    if explicit_date:
+        print(f"No summary for {requested_date} — showing most recent ({fallback_date}).\n")
     else:
-        print(f"No summary for {date_str}. Run 'ambient summary' first.")
+        print(f"No summary for today yet — showing most recent ({fallback_date}).\n")
+    print(fallback_path.read_text())
+
+
+def _most_recent_summary(config: Config, before: str | None = None):
+    """Return (date_str, Path) for the newest summary on-or-before `before`, or None."""
+    analysis_dir = config.analysis_dir
+    if not analysis_dir.exists():
+        return None
+    candidates = []
+    for p in analysis_dir.glob("summary-*.md"):
+        date_part = p.stem.replace("summary-", "")
+        if before and date_part > before:
+            continue
+        candidates.append((date_part, p))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0]
 
 
 def cmd_calibrate(config: Config, args):
@@ -268,14 +368,39 @@ def cmd_recommendations(config: Config, args):
         print("No pending recommendations.")
         return
 
-    print(f"{'ID':<30} {'TYPE':<10} TITLE")
-    print("-" * 70)
+    rows = []
+    skipped = 0
     for f in files:
         rec_id = f.stem
         meta = parse_recommendation_frontmatter(f.read_text())
         rec_type = meta.get("type", "unknown")
-        title = meta.get("title", rec_id)
-        print(f"{rec_id:<30} {rec_type:<10} {title}")
+        title = (meta.get("title") or "").strip()
+        # Drop empty-title rows and interrupt-noise artifacts.
+        if not title or title in ("Skill:", "Skill: "):
+            skipped += 1
+            continue
+        lower_title = title.lower()
+        if "interrupted by user" in lower_title or "api error" in lower_title:
+            skipped += 1
+            continue
+        rows.append((rec_id, rec_type, title))
+
+    if not rows:
+        print("No pending recommendations.")
+        if skipped:
+            print(f"(Filtered {skipped} empty/noise entries.)")
+        return
+
+    id_width = 30
+    type_width = 10
+    print(f"{'ID':<{id_width}} {'TYPE':<{type_width}} TITLE")
+    print("-" * 80)
+    for rec_id, rec_type, title in rows:
+        rid = rec_id if len(rec_id) <= id_width else rec_id[: id_width - 1] + "…"
+        rtype = rec_type if len(rec_type) <= type_width else rec_type[: type_width - 1] + "…"
+        print(f"{rid:<{id_width}} {rtype:<{type_width}} {title}")
+    if skipped:
+        print(f"\n({skipped} empty/noise entr{'y' if skipped == 1 else 'ies'} hidden.)")
 
 
 def cmd_apply(config: Config, args):
@@ -325,8 +450,9 @@ def cmd_projects(config: Config, args):
         events = read_events_window(config, window)
         label = f"last {window} minutes"
     else:
-        events = read_events_window(config, config.default_window_minutes)
-        label = f"last {config.default_window_minutes} minutes"
+        from ambient.capture.reader import read_events_today
+        events = read_events_today(config)
+        label = "today"
 
     if not events:
         print(f"No events for {label}.")
@@ -557,6 +683,7 @@ def cmd_tmux_focus_enable(config: Config, args):
         sys.exit(1)
     print("tmux focus hooks installed.")
     print(f"  Hooks: {', '.join(tmux_focus.HOOKS)}")
+    print(f"  focus-events: on (prior value saved; restored on disable)")
     print(f"  Events appended to: {config.focus_events_path}")
     print(f"  Privacy contract: docs/PRIVACY.md (clauses 6, 7)")
     print(f"  Captured fields: pane_id, window_index, session_name, event, ts")
@@ -629,26 +756,51 @@ def cmd_vectors(config: Config, args):
     activity_only = VectorFindings(
         vectors=[v for v in findings.vectors if v.stop_reason != "end_of_window"],
     )
-    print(f"\nPer project (top {config.vectors_per_project} longest activity vectors):")
+    include_passive = bool(getattr(args, "include_passive", False))
+    label = "all longest" if include_passive else "longest with text"
+    print(
+        f"\nPer project (top {config.vectors_per_project} {label} vectors):"
+    )
     by_project = top_vectors_per_project(activity_only, n=config.vectors_per_project)
     projects_ordered = sorted(
         by_project.items(),
         key=lambda kv: kv[1][0].duration_ms if kv[1] else 0,
         reverse=True,
     )
+    # Pre-compute per-project passive totals across ALL vectors (not just the
+    # top-N slice) so the rollup reflects reality.
+    passive_totals: dict[str, tuple[int, int]] = {}
+    for v in activity_only.vectors:
+        if v.last_command_or_prompt:
+            continue
+        count, dur = passive_totals.get(v.project, (0, 0))
+        passive_totals[v.project] = (count + 1, dur + v.duration_ms)
+
     for project, vectors in projects_ordered:
         total_min = sum(v.duration_ms for v in findings.vectors if v.project == project) // 60_000
         proj_count = findings.count_by_project.get(project, 0)
+
+        text_vectors = [v for v in vectors if v.last_command_or_prompt]
+        display_vectors = vectors if include_passive else text_vectors
+        passive_count, passive_dur = passive_totals.get(project, (0, 0))
+
         print(f"  {project} ({total_min}min, {proj_count} vectors)")
-        for v in vectors:
+        for v in display_vectors:
             mins = v.duration_ms / 60_000
             stop_label = v.stop_reason
             if v.stop_reason == "pause" and v.pause_duration_ms:
                 stop_label = f"pause({v.pause_duration_ms / 60_000:.1f}m)"
             elif v.stop_reason == "exit":
                 stop_label = "exit (session)"
-            text = (v.last_command_or_prompt or "")[:60] or "(no text)"
+            text = (v.last_command_or_prompt or "")[:60]
             print(f"    {mins:5.1f}m  {stop_label:14s}  {text}")
+        if not include_passive and passive_count:
+            print(
+                f"    +{passive_count} passive focus vectors "
+                f"({passive_dur / 60_000:.0f}m total — pass --include-passive to show)"
+            )
+        if not display_vectors and not passive_count:
+            print("    (no vectors)")
 
     print(f"\nClassification: {dict(findings.count_by_classification)}")
 
@@ -673,6 +825,12 @@ def main():
     summary_parser.add_argument("--date", help="Date to summarize (YYYY-MM-DD)")
 
     review_parser = subparsers.add_parser("review", help="View daily summary")
+    review_parser.add_argument(
+        "date_positional",
+        nargs="?",
+        metavar="DATE",
+        help="Date to review (YYYY-MM-DD). Falls back to most recent summary if missing.",
+    )
     review_parser.add_argument("--date", help="Date to review (YYYY-MM-DD)")
 
     subparsers.add_parser("calibrate", help="Fit GMM on accumulated event data")
@@ -725,6 +883,12 @@ def main():
         help="Show vector aggregation table for the last N days (diagnostic)",
     )
     vectors_parser.add_argument("--window", type=int, help="Window in days (default: 7)")
+    vectors_parser.add_argument(
+        "--include-passive",
+        dest="include_passive",
+        action="store_true",
+        help="Show focus_change vectors with no command/prompt text (otherwise rolled up).",
+    )
 
     args = parser.parse_args()
     config = Config()
