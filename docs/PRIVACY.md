@@ -1,7 +1,7 @@
 # Privacy Policy — ambient-ai
 
 **Status:** Active contract. Future capture units must verify against the rules below by clause number. Changing a "closed door" requires explicit user approval recorded in this document.
-**Last reviewed:** 2026-04-27
+**Last reviewed:** 2026-06-12
 **Scope:** All capture, storage, processing, and external transmission performed by ambient-ai on the user's local machine.
 
 ambient-ai is a personal-tool behavioral monitor for the user's own development workflow. The data it captures is sensitive — command history, file paths, prompt text, focus events. The system grows by accumulating signals the user trusts, not by capturing everything technically possible. This document is the contract that governs that growth.
@@ -53,7 +53,7 @@ The following signal classes are **permanently excluded** under this policy as w
 
 Every new capture unit (anything that writes to a new file under `~/.ambient/`, subscribes to a new OS notification class, or hooks a new external system) must include a **verification step** in its plan that cites specific clauses of this document by number.
 
-Example (from `docs/plans/2026-04-26-001-...md`, Unit 7 NSWorkspace listener):
+Example (from the plan unit that introduced the NSWorkspace app-activation listener):
 
 > **Verification:** … Verification cites `docs/PRIVACY.md` clauses 6 and 7 by number.
 
@@ -109,6 +109,4 @@ A capture change that does not include all five steps is out of scope.
 
 ## Section 7 — References
 
-- `docs/brainstorms/2026-04-26-stop-point-event-taxonomy.md` — origin of clauses 1-8 and the "closed doors" framing.
-- `docs/plans/2026-04-26-001-feat-vector-model-foundation-plan.md` — the plan that introduces opt-in focus capture (Units 7-9) gated by this document.
 - Existing call sites: `src/ambient/present/api.py` (single Anthropic API entry point), `src/ambient/present/narrator.py` (daily/weekly Sonnet), `src/ambient/detect/project_ledger.py` (per-project Haiku summarizer).

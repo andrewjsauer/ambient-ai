@@ -245,8 +245,7 @@ def _cwd_to_slug(cwd: str) -> str:
 
     Claude Code stores per-session JSONL under ~/.claude/projects/<slug>/
     where the slug is the absolute cwd with `/` replaced by `-`. So
-    `/Users/you/projects/my-app` becomes
-    `-Users-you-projects-my-app`.
+    `/Users/you/projects/my-app` becomes `-Users-you-projects-my-app`.
     """
     return cwd.replace("/", "-")
 

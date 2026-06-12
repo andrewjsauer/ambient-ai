@@ -25,3 +25,12 @@ venv/
 memory/
 .context/
 .claude/
+
+# Internal planning artifacts — the planning workflow writes working docs
+# here (often containing real captured data); they must never be committed
+# to the public repository.
+docs/plans/
+docs/brainstorms/
+docs/ideation/
+docs/solutions/
+research/

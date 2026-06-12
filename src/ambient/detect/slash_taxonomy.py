@@ -2,12 +2,12 @@
 
 Classifies Claude Code slash commands into intent categories so detectors
 can answer "how much planning vs execution vs review" without re-deriving
-the mapping. The taxonomy is validated against a real 7,253-session
-inventory (see docs/brainstorms/2026-04-26-claude-code-history-inventory.md).
+the mapping. The taxonomy was validated against a large inventory of real
+Claude Code sessions during development.
 
 Categories:
     planning   — ce-plan, ce-brainstorm, ce-ideate, deepen-plan, value-realization
-    execution  — ce-work, /work, /ship, /ship-staging, /cleanup-*
+    execution  — ce-work, /work, /ship, /cleanup-*
     review     — ce-review, aeo-audit, delight-auditor
     design     — frontend-design, ui-ux-pro-max, extract-design
     meta       — /clear, /model, /login, /effort, /insights
@@ -45,7 +45,6 @@ _EXECUTION: frozenset[str] = frozenset({
     "/compound-engineering:ce:work",
     "/work",
     "/ship",
-    "/ship-staging",
     "/cleanup-branch",
     "/cleanup-tree",
     "/cleanup",

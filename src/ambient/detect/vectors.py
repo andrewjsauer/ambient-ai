@@ -1,8 +1,8 @@
 """Vector aggregation detector (v4 Phase 3).
 
 Re-shapes existing signals (shell commands, Claude prompts, pauses, focus
-events) into the stop-point/event-vector model from
-docs/brainstorms/2026-04-26-stop-point-event-taxonomy.md.
+events) into a stop-point/event-vector model: the day is a sequence of
+activity vectors, each terminated by an observable stop event.
 
 A *vector* is a stretch of activity terminated by a stop event:
     - "enter"        — a command was submitted or a Claude prompt arrived
