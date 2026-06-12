@@ -132,23 +132,33 @@ def install_hooks(focus_events_path: Path) -> None:
 
     # pane-focus-{in,out} only fire with `focus-events on`; flip it on now and
     # remember the user's prior value so uninstall can restore it.
-    _save_and_enable_focus_events()
+    try:
+        _save_and_enable_focus_events()
 
-    quoted_path = shlex.quote(str(focus_events_path))
-    quoted_script = shlex.quote(str(script))
+        quoted_path = shlex.quote(str(focus_events_path))
+        quoted_script = shlex.quote(str(script))
 
-    for hook in HOOKS:
-        cmd = (
-            f"AMBIENT_FOCUS_EVENTS_PATH={quoted_path} "
-            f"{quoted_script} {hook} {SENTINEL}"
-        )
-        # tmux's run-shell takes a single shell-string arg; wrap in shlex.quote
-        # so the outer tmux-arg layer is also bulletproof.
-        run_shell_arg = f"run-shell {shlex.quote(cmd)}"
-        subprocess.run(
-            ["tmux", "set-hook", "-ga", hook, run_shell_arg],
-            check=True,
-        )
+        for hook in HOOKS:
+            cmd = (
+                f"AMBIENT_FOCUS_EVENTS_PATH={quoted_path} "
+                f"{quoted_script} {hook} {SENTINEL}"
+            )
+            # tmux's run-shell takes a single shell-string arg; wrap in
+            # shlex.quote so the outer tmux-arg layer is also bulletproof.
+            run_shell_arg = f"run-shell {shlex.quote(cmd)}"
+            subprocess.run(
+                ["tmux", "set-hook", "-ga", hook, run_shell_arg],
+                check=True,
+            )
+    except subprocess.CalledProcessError as e:
+        # tmux binary present but no server running: set-option/set-hook fail.
+        # Raise RuntimeError so the CLI handler prints a clean message instead
+        # of a traceback; uninstall_hooks already ran, so nothing is left
+        # half-installed.
+        raise RuntimeError(
+            "tmux is installed but no server appears to be running; "
+            "start a tmux session and re-run tmux-focus-enable"
+        ) from e
 
 
 def uninstall_hooks() -> None:

@@ -54,6 +54,16 @@ def _normalize(prompt: str) -> str:
     return text[:MAX_NORMALIZED_LENGTH]
 
 
+def is_chrome_noise(text: str) -> bool:
+    """True when text contains Claude-Code chrome markers (interrupt/API-error
+    artifacts) rather than user intent. Single source of truth shared by this
+    detector, the recommender's skill filter, and the CLI recommendation
+    filters — the marker strings track Claude Code's message format and must
+    not drift across call sites."""
+    lower = text.lower()
+    return any(marker in lower for marker in _CHROME_SUBSTRINGS)
+
+
 def _is_noise(prompt: str) -> bool:
     stripped = prompt.strip()
     if len(stripped) < MIN_PROMPT_LENGTH:
@@ -61,9 +71,7 @@ def _is_noise(prompt: str) -> bool:
     lower = stripped.lower()
     if lower in NOISE_PATTERNS:
         return True
-    if any(marker in lower for marker in _CHROME_SUBSTRINGS):
-        return True
-    return False
+    return is_chrome_noise(stripped)
 
 
 def detect_prompt_patterns(

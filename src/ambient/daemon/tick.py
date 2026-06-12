@@ -129,7 +129,7 @@ def _ingest_claude_sessions(config: Config, state: DaemonState) -> None:
 
 
 def _get_new_events(config: Config, state: DaemonState) -> list:
-    from ambient.capture.reader import _date_range, read_events
+    from ambient.capture.reader import date_range, read_events
 
     if state.last_analyzed_ts > 0:
         cursor_dt = datetime.fromtimestamp(state.last_analyzed_ts / 1000)
@@ -145,7 +145,7 @@ def _get_new_events(config: Config, state: DaemonState) -> list:
     # the cursor was set". Shared reader semantics stay untouched for its
     # other callers.
     events = []
-    for ds in _date_range(cursor_dt, datetime.now()):
+    for ds in date_range(cursor_dt, datetime.now()):
         events.extend(read_events(config, date_str=ds))
     return [e for e in events if e.ts_end >= state.last_analyzed_ts]
 
@@ -367,7 +367,11 @@ def _check_weekly_summary(config: Config, state: DaemonState, client=None) -> No
     if narrative is None:
         logger.warning("Weekly summary generation failed; will retry on a later tick")
         return
-    state.last_weekly_summary_date = today_str
+    # Anchor the cadence to the most recent Sunday: an overdue retry firing on
+    # Monday+ must not move the schedule, or the next real Sunday would see
+    # days_since < 7 and skip, drifting the cadence one weekday per outage.
+    anchor = today - timedelta(days=(today.weekday() + 1) % 7)
+    state.last_weekly_summary_date = anchor.strftime("%Y-%m-%d")
 
 
 def _check_recalibration(config: Config, state: DaemonState) -> None:

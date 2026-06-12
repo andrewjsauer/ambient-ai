@@ -184,8 +184,8 @@ def _generate_skill_recommendation(pattern: dict, config: Config, client=None) -
     # Skip empty / chrome / interrupt patterns that slipped past noise filters.
     if not normalized or len(normalized) < 3:
         return None
-    lower = normalized.lower()
-    if "interrupted by user" in lower or "api error" in lower:
+    from ambient.detect.prompt_patterns import is_chrome_noise
+    if is_chrome_noise(normalized):
         return None
 
     prompt = f"""A developer repeatedly types this kind of prompt in Claude Code ({count} times):

@@ -234,8 +234,58 @@ def test_check_weekly_summary_overdue_retry_after_sunday(mock_api, config):
         mock_dt.strptime = datetime.strptime
         _check_weekly_summary(config, state)
 
-    assert state.last_weekly_summary_date == "2026-04-06"
+    # The cadence anchors to the MISSED Sunday (Apr 5), not the Monday it
+    # fired — otherwise the next real Sunday sees days_since=6 and skips,
+    # drifting the schedule one weekday per outage.
+    assert state.last_weekly_summary_date == "2026-04-05"
     assert config.weekly_summary_path("2026-04-06").exists()
+
+    # And the following Sunday (Apr 12, days_since=7) fires on schedule.
+    with patch("ambient.daemon.tick.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 4, 12, 12, 0)  # next Sunday
+        mock_dt.strptime = datetime.strptime
+        _check_weekly_summary(config, state)
+    assert state.last_weekly_summary_date == "2026-04-12"
+
+
+@patch("ambient.present.narrator._call_api")
+def test_check_weekly_summary_not_overdue_at_seven_days(mock_api, config):
+    """Non-Sunday with days_since exactly 7 (the normal post-Sunday state)
+    must NOT fire — only 8+ days means a Sunday was missed."""
+    from ambient.daemon.state import DaemonState
+    from ambient.daemon.tick import _check_weekly_summary
+
+    state = DaemonState(last_weekly_summary_date="2026-03-30")  # Monday
+    _write_analysis(config, "2026-04-01")
+    _write_analysis(config, "2026-03-25")
+
+    with patch("ambient.daemon.tick.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 4, 6, 12, 0)  # Monday, 7 days
+        mock_dt.strptime = datetime.strptime
+        _check_weekly_summary(config, state)
+
+    mock_api.assert_not_called()
+    assert state.last_weekly_summary_date == "2026-03-30"
+
+
+@patch("ambient.present.narrator._call_api")
+def test_check_weekly_summary_sunday_skips_when_recent(mock_api, config):
+    """Sunday with days_since=6 (generated mid-week, e.g. an anchor bug)
+    must skip — the < 7 suppression guards double generation."""
+    from ambient.daemon.state import DaemonState
+    from ambient.daemon.tick import _check_weekly_summary
+
+    state = DaemonState(last_weekly_summary_date="2026-03-30")  # prior Monday
+    _write_analysis(config, "2026-04-01")
+    _write_analysis(config, "2026-03-25")
+
+    with patch("ambient.daemon.tick.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 4, 5, 12, 0)  # Sunday, 6 days
+        mock_dt.strptime = datetime.strptime
+        _check_weekly_summary(config, state)
+
+    mock_api.assert_not_called()
+    assert state.last_weekly_summary_date == "2026-03-30"
 
 
 def test_weekly_summary_path(config):

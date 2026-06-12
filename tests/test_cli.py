@@ -321,3 +321,66 @@ def test_projects_with_data(config):
     assert "project-beta" in output
     assert "Context switches" in output
     assert "Primary project" in output
+
+
+def test_summary_api_failure_exits_nonzero(config, monkeypatch):
+    """cmd_summary exits 1 and writes nothing when narrate_daily returns None."""
+    import os
+    from datetime import datetime
+    from unittest.mock import patch
+
+    from ambient.cli import cmd_summary
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    analysis_path = config.analysis_path(date_str)
+    analysis_path.parent.mkdir(parents=True, exist_ok=True)
+    analysis_path.write_text(json.dumps({"analysis": {"summary": "batch"}}) + "\n")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    args = type("Args", (), {"date": None})()
+    with patch("ambient.present.narrator._call_api", side_effect=Exception("down")):
+        with pytest.raises(SystemExit) as exc:
+            cmd_summary(config, args)
+    assert exc.value.code == 1
+    assert not config.summary_path(date_str).exists()
+
+
+def test_pending_rec_count_filters_noise(config):
+    """_pending_rec_count counts only real recommendations."""
+    from ambient.cli import _pending_rec_count
+
+    rec_dir = config.recommendations_dir
+    rec_dir.mkdir(parents=True, exist_ok=True)
+    (rec_dir / "skill-real.md").write_text(
+        '---\ntype: skill\ntitle: "Skill: summarize PR feedback"\n---\nbody\n')
+    (rec_dir / "skill-empty.md").write_text('---\ntype: skill\ntitle: "Skill:"\n---\nbody\n')
+    (rec_dir / "skill-interrupt.md").write_text(
+        '---\ntype: skill\ntitle: "Skill: [request interrupted by user]"\n---\nbody\n')
+    (rec_dir / "skill-apierr.md").write_text(
+        '---\ntype: skill\ntitle: "Skill: api error: overloaded"\n---\nbody\n')
+
+    assert _pending_rec_count(config) == 1
+
+
+def test_insights_api_failure_exits_nonzero(config, monkeypatch):
+    """cmd_insights exits 1 when report generation fails (matches cmd_summary)."""
+    from unittest.mock import patch
+
+    from ambient.cli import cmd_insights
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    args = type("Args", (), {"window": 7, "by_day": False})()
+
+    class FakeFindings:
+        count_by_classification = {"productive": 2, "friction": 1}
+
+    class FakeData:
+        coaching_findings = FakeFindings()
+        by_day = False
+
+    with patch("ambient.present.insights.aggregate_coaching_data", return_value=FakeData()), \
+         patch("ambient.present.insights.format_terminal_summary", return_value="summary"), \
+         patch("ambient.present.insights.generate_insights_report", return_value=None):
+        with pytest.raises(SystemExit) as exc:
+            cmd_insights(config, args)
+    assert exc.value.code == 1

@@ -330,3 +330,24 @@ class TestPrivacyContract:
             assert token not in script_text, (
                 f"Privacy violation: hook script must not interpolate {token}"
             )
+
+
+class TestNoServer:
+    def test_install_hooks_raises_runtime_error_without_server(self, tmp_path):
+        """tmux on PATH but no server: install_hooks must raise RuntimeError
+        (clean CLI message), not leak a raw CalledProcessError traceback."""
+        import subprocess
+        from unittest.mock import patch
+
+        from ambient.capture import tmux_focus
+
+        boom = subprocess.CalledProcessError(1, ["tmux", "set-option"])
+        with patch.object(tmux_focus, "tmux_available", return_value=True), \
+             patch.object(tmux_focus, "hook_script_path") as mock_script, \
+             patch.object(tmux_focus, "uninstall_hooks"), \
+             patch.object(tmux_focus, "_save_and_enable_focus_events", side_effect=boom):
+            script = tmp_path / "hook.sh"
+            script.write_text("#!/bin/sh\n")
+            mock_script.return_value = script
+            with pytest.raises(RuntimeError, match="no server appears to be running"):
+                tmux_focus.install_hooks(tmp_path / "focus-events.jsonl")

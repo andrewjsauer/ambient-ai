@@ -28,7 +28,7 @@ The following rules apply to every signal class ambient-ai captures, today or in
 
 8. **Quarantine for browser data.** If a browser extension is ever added (today: out of scope; deferred to a separate repo), it operates behind the extension boundary — communicating with the local daemon over a defined IPC surface, never reading other apps' SQLite stores or arbitrary cookies. The browser-extension signal class enters under its own opt-in toggle and its own privacy-rules amendment to this document.
 
-9. **API-bound payload review.** The two existing LLM call sites — `narrate_batch`/`narrate_daily`/`narrate_weekly` (Sonnet) and `project_ledger._summarize` (Haiku) — send aggregated findings and a capped subset of user prompts. These call sites are the entire external surface. Every new external call site must be enumerated here before merge.
+9. **API-bound payload review.** The four existing LLM call-site modules — `present/narrator.py` (`narrate_batch` Haiku; `narrate_daily`/`narrate_weekly` Sonnet), `present/insights.py` (coaching report, Sonnet), `present/recommender.py` (skill and coaching drafts, Haiku), and `detect/project_ledger.py` (`_summarize`, Haiku) — send aggregated findings and a capped subset of user prompts. These call sites are the entire external surface. Every new external call site must be enumerated here before merge.
 
 ---
 
@@ -109,4 +109,4 @@ A capture change that does not include all five steps is out of scope.
 
 ## Section 7 — References
 
-- Existing call sites: `src/ambient/present/api.py` (single Anthropic API entry point), `src/ambient/present/narrator.py` (daily/weekly Sonnet), `src/ambient/detect/project_ledger.py` (per-project Haiku summarizer).
+- Existing call sites: `src/ambient/present/api.py` (single Anthropic API entry point), `src/ambient/present/narrator.py` (batch Haiku + daily/weekly Sonnet), `src/ambient/present/insights.py` (coaching report, Sonnet), `src/ambient/present/recommender.py` (skill/coaching drafts, Haiku), `src/ambient/detect/project_ledger.py` (per-project Haiku summarizer).

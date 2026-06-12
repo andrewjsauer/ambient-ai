@@ -405,3 +405,20 @@ class TestCrossSessionNgrams:
                  if p.scope == "cross_session" and p.normalized_prompt == "plan it -> ship it"]
         assert within, "expected within-session plan it -> ship it pattern"
         assert cross, "expected cross-session plan it -> ship it pattern"
+
+
+class TestChromeNoise:
+    def test_chrome_markers_are_noise(self):
+        from ambient.detect.prompt_patterns import _is_noise, is_chrome_noise
+
+        assert is_chrome_noise("[Request interrupted by user]")
+        assert is_chrome_noise("API Error: overloaded")
+        assert is_chrome_noise("(no content)")
+        assert _is_noise("[Request interrupted by user]")
+        assert _is_noise("api error")
+
+    def test_real_prompts_are_not_chrome(self):
+        from ambient.detect.prompt_patterns import _is_noise, is_chrome_noise
+
+        assert not is_chrome_noise("fix the failing auth test")
+        assert not _is_noise("fix the failing auth test")

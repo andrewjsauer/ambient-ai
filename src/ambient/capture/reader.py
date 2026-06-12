@@ -71,7 +71,8 @@ def _read_file(path: Path) -> Iterator[Event]:
                 logger.warning("Skipping malformed line %d in %s: %s", line_num, path, e)
 
 
-def _date_range(start: datetime, end: datetime) -> list[str]:
+def date_range(start: datetime, end: datetime) -> list[str]:
+    """YYYY-MM-DD strings for every calendar day from start to end inclusive."""
     dates = []
     current = start.date()
     end_date = end.date()
@@ -94,7 +95,7 @@ def read_events(
     if start and end:
         start_ms = int(start.timestamp() * 1000)
         end_ms = int(end.timestamp() * 1000)
-        date_strs = _date_range(start, end)
+        date_strs = date_range(start, end)
     elif date_str:
         date_strs = [date_str]
         start_ms = None

@@ -114,6 +114,17 @@ def cmd_status(config: Config, args):
     print(f"Try          {' · '.join(suggestions)}")
 
 
+def _is_noise_rec_title(title: str) -> bool:
+    """True for empty-title rows and interrupt/API-error artifacts that should
+    not surface as pending recommendations."""
+    from ambient.detect.prompt_patterns import is_chrome_noise
+
+    title = title.strip()
+    if not title or title in ("Skill:", "Skill: "):
+        return True
+    return is_chrome_noise(title)
+
+
 def _pending_rec_count(config: Config) -> int:
     from ambient.present.recommender import parse_recommendation_frontmatter
 
@@ -126,11 +137,7 @@ def _pending_rec_count(config: Config) -> int:
             meta = parse_recommendation_frontmatter(f.read_text())
         except Exception:
             continue
-        title = (meta.get("title") or "").strip()
-        if not title or title in ("Skill:", "Skill: "):
-            continue
-        lower = title.lower()
-        if "interrupted by user" in lower or "api error" in lower:
+        if _is_noise_rec_title(meta.get("title") or ""):
             continue
         count += 1
     return count
@@ -292,7 +299,11 @@ def cmd_review(config: Config, args):
     summary_path = config.summary_path(requested_date)
 
     if summary_path.exists():
-        print(summary_path.read_text())
+        try:
+            print(summary_path.read_text())
+        except OSError as e:
+            print(f"Summary for {requested_date} could not be read: {e}", file=sys.stderr)
+            sys.exit(1)
         return
 
     # Fallback: show the most recent summary so `ambient review` never dead-ends.
@@ -307,7 +318,11 @@ def cmd_review(config: Config, args):
         print(f"No summary for {requested_date} — showing most recent ({fallback_date}).\n")
     else:
         print(f"No summary for today yet — showing most recent ({fallback_date}).\n")
-    print(fallback_path.read_text())
+    try:
+        print(fallback_path.read_text())
+    except OSError as e:
+        print(f"Summary {fallback_date} could not be read: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _most_recent_summary(config: Config, before: str | None = None):
@@ -376,15 +391,14 @@ def cmd_recommendations(config: Config, args):
     skipped = 0
     for f in files:
         rec_id = f.stem
-        meta = parse_recommendation_frontmatter(f.read_text())
-        rec_type = meta.get("type", "unknown")
-        title = (meta.get("title") or "").strip()
-        # Drop empty-title rows and interrupt-noise artifacts.
-        if not title or title in ("Skill:", "Skill: "):
+        try:
+            meta = parse_recommendation_frontmatter(f.read_text())
+        except OSError:
             skipped += 1
             continue
-        lower_title = title.lower()
-        if "interrupted by user" in lower_title or "api error" in lower_title:
+        rec_type = meta.get("type", "unknown")
+        title = (meta.get("title") or "").strip()
+        if _is_noise_rec_title(title):
             skipped += 1
             continue
         rows.append((rec_id, rec_type, title))
@@ -516,7 +530,11 @@ def cmd_insights(config: Config, args):
         date_str = datetime.now().strftime("%Y-%m-%d")
         print(f"\nFull report: {config.insights_path(date_str)}")
     else:
-        print("\nReport generation failed (API error). Terminal summary above is still valid.")
+        # Same failure contract as cmd_summary: nonzero exit so scripts and
+        # agents can distinguish "report generated" from "API failed".
+        print("\nReport generation failed (API error). Terminal summary above is still valid.",
+              file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_daemon_tick(config: Config, args):
