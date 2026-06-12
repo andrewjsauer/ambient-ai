@@ -39,7 +39,9 @@ def _session(ts_start=2000, duration_ms=300_000, project="auth", session_id="ses
         claude_prompts=["fix the test"],
         claude_tools=[{"name": "Edit", "files": ["test.py"]}],
         claude_files=["test.py"],
-        claude_project=project,
+        # Real ingestion writes claude_project as the session's FULL cwd path
+        # (session_parser captures cwd verbatim) — never a bare project name.
+        claude_project=f"/home/user/{project}",
         claude_prompt_count=prompt_count,
         claude_is_error_count=error_count,
     )
@@ -82,6 +84,36 @@ class TestDetectResolutionChains:
         projects = {c.project for c in chains}
         assert projects == {"auth", "frontend"}
         assert all(c.resolved for c in chains)
+
+    def test_full_path_claude_project_groups_with_commands(self):
+        """Regression: claude_project is a full path on real data; the session
+        must land in the same project group as the failed/success commands or
+        the chain never stitches (the pre-fix code returned the path verbatim,
+        so no real chain ever resolved)."""
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1000, cwd="/Users/x/proj"),
+            _session(ts_start=10000, session_id="s1"),
+            _cmd("pytest", exit_code=0, ts_start=320000, cwd="/Users/x/proj"),
+        ]
+        # Override the fixture's path to share only the basename with cwd.
+        events[1].claude_project = "/Users/x/proj"
+        chains = detect_resolution_chains(events, _config())
+        assert len(chains) == 1
+        assert chains[0].resolved is True
+        assert chains[0].project == "proj"
+        assert "s1" in chains[0].claude_session_ids
+
+    def test_session_without_claude_project_falls_back_to_cwd(self):
+        """A session missing claude_project groups by its cwd basename."""
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1000, cwd="/home/user/auth"),
+            _session(ts_start=10000, session_id="s1"),
+            _cmd("pytest", exit_code=0, ts_start=320000, cwd="/home/user/auth"),
+        ]
+        events[1].claude_project = None
+        chains = detect_resolution_chains(events, _config())
+        assert len(chains) == 1
+        assert chains[0].project == "auth"
 
     def test_no_claude_session_no_chain(self):
         """Failed command with no subsequent Claude session → no chain."""

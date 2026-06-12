@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from ambient.capture.reader import Event
 from ambient.config import Config
 from ambient.detect.correlator import BENIGN_NONZERO_COMMANDS, _base_command
+from ambient.detect.projects import _derive_project as _shared_derive_project
 
 
 FIRST_PROMPT_MAX_LENGTH = 120
@@ -52,11 +53,11 @@ def _is_failed_command(event: Event) -> bool:
 
 
 def _derive_project(event: Event) -> str:
-    if event.type == "claude_session" and event.claude_project:
-        return event.claude_project
-    if event.cwd:
-        return event.cwd.rstrip("/").rsplit("/", 1)[-1]
-    return "unknown"
+    # Delegate to projects._derive_project (as vectors.py does) so commands and
+    # claude_session events collapse to the same basename key. The daemon writes
+    # claude_project as a FULL cwd path; returning it verbatim split every real
+    # fail→Claude→success chain into two groups and no chain ever resolved.
+    return _shared_derive_project(event)
 
 
 def _capped_contribution(event: Event, config: Config) -> int:
