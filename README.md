@@ -245,7 +245,7 @@ Install with `ambient apply <id>` which copies skills to `~/.claude/commands/`. 
 
 ```
 src/ambient/
-  cli.py                            # CLI entry point (21 commands)
+  cli.py                            # CLI entry point (22 commands)
   config.py                         # all tunable parameters
   capture/
     hooks.zsh                       # zsh preexec/precmd hooks
