@@ -162,7 +162,7 @@ def detect_verification_gaps(
         # otherwise mark every such fix as an (false) gap. Session-level signal:
         # it does not prove the verification ran *after* the last edit, only that
         # the session verified at all.
-        verified = bool(getattr(event, "claude_ran_verification", False))
+        verified = event.claude_ran_verification
         if not verified and patterns:
             for cmd in command_events:
                 gap = cmd.ts_start - event.ts_end

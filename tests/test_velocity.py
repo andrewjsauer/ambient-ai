@@ -80,6 +80,18 @@ class TestDetectResolutionChains:
         assert chains[0].resolved is True
         assert chains[0].closure_reason == "in_session"
         assert "s1" in chains[0].claude_session_ids
+        assert chains[0].active_time_ms == 600_000  # capped session contribution
+
+    def test_two_in_session_resolutions_same_project(self):
+        """Two independent in-session fix loops in one project → two chains."""
+        s1 = _session(ts_start=10000, duration_ms=120_000, session_id="s1")
+        s2 = _session(ts_start=200000, duration_ms=120_000, session_id="s2")
+        s1.claude_verification_resolved = True
+        s2.claude_verification_resolved = True
+        chains = detect_resolution_chains([s1, s2], _config())
+        assert len(chains) == 2
+        assert all(c.closure_reason == "in_session" for c in chains)
+        assert {sid for c in chains for sid in c.claude_session_ids} == {"s1", "s2"}
 
     def test_in_session_resolution_closes_open_shell_chain(self):
         """Shell fail → session that resolves in-session → chain resolved even
@@ -521,6 +533,29 @@ class TestComputeVelocityMetrics:
         assert "frontend" in metrics.by_project
         assert metrics.by_project["auth"].avg_ms == 60_000
         assert metrics.by_project["frontend"].avg_ms == 30_000
+
+    def test_in_session_counts_as_resolved(self):
+        """in_session chains count toward resolved_count and by_reason."""
+        chains = [
+            ResolutionChain(
+                initial_failure_ts=0, initial_command="(in-session test failure)",
+                claude_session_ids=["s1"], resolution_ts=120_000,
+                resolution_command="(in-session verification)", active_time_ms=120_000,
+                wall_time_ms=120_000, project="auth", outcome="productive",
+                closure_reason="in_session",
+            ),
+            ResolutionChain(
+                initial_failure_ts=0, initial_command="pytest",
+                claude_session_ids=[], resolution_ts=100000, resolution_command="",
+                active_time_ms=60_000, wall_time_ms=100000, project="auth",
+                outcome="productive", closure_reason="end_of_window",
+            ),
+        ]
+        metrics = compute_velocity_metrics(chains)
+        assert metrics.total_chains == 2
+        assert metrics.resolved_count == 1
+        assert metrics.by_reason["in_session"] == 1
+        assert metrics.avg_ms == 120_000
 
     def test_unresolved_excluded_from_metrics(self):
         chains = [

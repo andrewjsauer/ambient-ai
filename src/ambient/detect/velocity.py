@@ -23,7 +23,7 @@ class ResolutionChain:
     wall_time_ms: int
     project: str
     outcome: str  # worst session outcome in chain
-    closure_reason: str  # "matched_success" | "idle_break" | "end_of_window"
+    closure_reason: str  # "matched_success" | "in_session" | "idle_break" | "end_of_window" | "given_up" | "context_rot" | "interrupt_mid_thought"
     first_claude_prompt: str = ""  # truncated first prompt of the first claude session in the chain
 
     @property

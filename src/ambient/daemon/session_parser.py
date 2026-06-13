@@ -17,6 +17,15 @@ _FILE_PATH_RE = re.compile(r'(?:^|["\s])(/[\w./-]+\.[\w]+)')
 # shell-hook stream never sees them — this is what made the verification-gap
 # detector report ~100% gaps on real data. We persist only a boolean per
 # session (did it verify?), never the command text.
+#
+# NOTE: this list overlaps config.verification_test_command_patterns /
+# verification_typecheck_command_patterns (used for SHELL commands in
+# detect/verification.py). The two are intentionally separate layers (session
+# Bash text vs shell events) but should be kept roughly in sync — update both
+# when adding a tool. Known coarseness (deferred): a substring match can fire
+# on a command that only mentions a tool (a commit message, an echo), and a
+# lint-only run credits a has_tests project; tightening these needs structural
+# command parsing + a test-vs-lint split.
 _VERIFICATION_CMD_RE = re.compile(
     r"\b("
     r"pytest|tox|nox|"

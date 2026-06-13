@@ -581,8 +581,12 @@ def _section_correlations(data: CoachingData, caps: dict) -> list[str]:
 
 
 def _section_resolution_chains(data: CoachingData, caps: dict) -> list[str]:
-    resolved = [c for c in data.chains if c.closure_reason == "matched_success"]
-    unresolved = [c for c in data.chains if c.closure_reason != "matched_success"]
+    # Use the .resolved property (matched_success OR in_session) so the rendered
+    # Resolved/Unresolved split matches resolved_count — otherwise in-session
+    # fix loops show as "unresolved" here while the velocity section counts them
+    # resolved, feeding the coaching LLM contradictory signals.
+    resolved = [c for c in data.chains if c.resolved]
+    unresolved = [c for c in data.chains if not c.resolved]
     resolved.sort(key=lambda c: c.active_time_ms)  # fastest first
     unresolved.sort(key=lambda c: c.active_time_ms, reverse=True)  # longest first
     resolved = resolved[: caps["resolution_chains_resolved"]]
@@ -982,11 +986,12 @@ def _section_velocity(data: CoachingData) -> list[str]:
     lines = [f"\nRESOLUTION VELOCITY ({v.total_chains} chains, {v.resolved_count} resolved):"]
     if v.by_reason:
         matched = v.by_reason.get("matched_success", 0)
+        in_session = v.by_reason.get("in_session", 0)
         idle = v.by_reason.get("idle_break", 0)
         eow = v.by_reason.get("end_of_window", 0)
         lines.append(
             f"  Closure reasons: matched-success={matched}, "
-            f"idle-break={idle}, end-of-window={eow}"
+            f"in-session={in_session}, idle-break={idle}, end-of-window={eow}"
         )
     if v.resolved_count > 0:
         lines.append(f"  Average active time: {v.avg_ms / 1000:.0f}s ({v.avg_ms / 60000:.1f}min)")

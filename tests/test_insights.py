@@ -509,6 +509,29 @@ def _fully_populated_data():
     )
 
 
+class TestResolutionChainRendering:
+    def test_in_session_chain_renders_as_resolved(self):
+        """Regression: in_session chains count as resolved in velocity, so the
+        TOP RESOLUTION CHAINS section must list them under Resolved — not
+        Unresolved — or the coaching LLM gets contradictory signals."""
+        from ambient.present.insights import _DEFAULT_CAPS, _section_resolution_chains
+
+        data = _sample_data(resolved_chains=0)
+        data.chains = [
+            ResolutionChain(
+                initial_failure_ts=0, initial_command="(in-session test failure)",
+                claude_session_ids=["s1"], resolution_ts=120_000,
+                resolution_command="(in-session verification)", active_time_ms=120_000,
+                wall_time_ms=120_000, project="auth", outcome="productive",
+                closure_reason="in_session",
+            ),
+        ]
+        text = "\n".join(_section_resolution_chains(data, _DEFAULT_CAPS))
+        assert "Resolved (fastest first):" in text
+        assert "in-session verification" in text
+        assert "Unresolved" not in text
+
+
 class TestRichBuildInsightsPrompt:
     def test_every_new_section_appears(self):
         prompt = build_insights_prompt(_fully_populated_data())
