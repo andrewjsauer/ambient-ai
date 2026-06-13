@@ -47,6 +47,8 @@ def parse_session_file(path: Path, skip_lines: int = 0) -> dict | None:
     tools: list[dict] = []
     files_touched: set[str] = set()
     ran_verification = False
+    pending_verif_ids: set[str] = set()   # verification Bash tool_use ids awaiting results
+    verif_results: list[bool] = []        # is_error of each verification, in order
     is_error_count = 0
     session_id = None
     project = None
@@ -105,9 +107,10 @@ def parse_session_file(path: Path, skip_lines: int = 0) -> dict | None:
                 if entry_type == "user" and not d.get("isMeta"):
                     _extract_user_message(d, prompts)
                     is_error_count += _count_errors_in_user(d)
+                    _record_verification_results(d, pending_verif_ids, verif_results)
 
                 elif entry_type == "assistant":
-                    if _extract_assistant_tools(d, tools, files_touched):
+                    if _extract_assistant_tools(d, tools, files_touched, pending_verif_ids):
                         ran_verification = True
 
     except OSError as e:
@@ -132,6 +135,7 @@ def parse_session_file(path: Path, skip_lines: int = 0) -> dict | None:
         "tools": tools,
         "files_touched": sorted(files_touched),
         "ran_verification": ran_verification,
+        "verification_resolved": _verification_resolved(verif_results),
         "is_error_count": is_error_count,
         "prompt_count": len(prompts),
         "start_ts": start_ms,
@@ -172,12 +176,15 @@ def _extract_user_message(d: dict, prompts: list[str]):
                         prompts.append(text)
 
 
-def _extract_assistant_tools(d: dict, tools: list[dict], files_touched: set[str]) -> bool:
+def _extract_assistant_tools(d: dict, tools: list[dict], files_touched: set[str],
+                             pending_verif_ids: set[str]) -> bool:
     """Extract tool_use blocks from an assistant message.
 
     Returns True if any Bash tool call in this message ran a verification
     command (test/typecheck/build/lint). The command text itself is matched
-    and discarded — only the boolean is propagated upward.
+    and discarded — only the boolean is propagated upward. Verification
+    tool_use ids are recorded in `pending_verif_ids` so the matching
+    tool_result (pass/fail) can be correlated in the user message that follows.
     """
     content = d.get("message", {}).get("content", [])
     if not isinstance(content, list):
@@ -193,6 +200,9 @@ def _extract_assistant_tools(d: dict, tools: list[dict], files_touched: set[str]
             cmd = inp.get("command", "")
             if isinstance(cmd, str) and _VERIFICATION_CMD_RE.search(cmd):
                 ran_verification = True
+                tid = block.get("id")
+                if tid:
+                    pending_verif_ids.add(tid)
 
         # Extract file paths from common tool inputs
         tool_files = []
@@ -205,6 +215,35 @@ def _extract_assistant_tools(d: dict, tools: list[dict], files_touched: set[str]
         tools.append({"name": name, "files": tool_files})
         files_touched.update(tool_files)
     return ran_verification
+
+
+def _record_verification_results(d: dict, pending_verif_ids: set[str],
+                                 verif_results: list[bool]) -> None:
+    """Correlate tool_results in a user message with pending verification
+    commands, appending each verification's is_error outcome in order."""
+    content = d.get("message", {}).get("content", "")
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        tid = block.get("tool_use_id")
+        if tid in pending_verif_ids:
+            verif_results.append(block.get("is_error") is True)
+            pending_verif_ids.discard(tid)
+
+
+def _verification_resolved(results: list[bool]) -> bool:
+    """True when a verification command failed and a later one passed — an
+    in-session fix loop (had a red test, ended green). `results` is the
+    ordered list of is_error outcomes for verification commands."""
+    had_fail = False
+    for is_err in results:
+        if is_err:
+            had_fail = True
+        elif had_fail:
+            return True
+    return False
 
 
 def discover_session_files(projects_dir: Path) -> list[Path]:

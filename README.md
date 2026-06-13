@@ -217,6 +217,7 @@ Claude Code writes per-session JSONL files to `~/.claude/projects/<slug>/<uuid>.
 - Measures active time (not wall clock)
 - 15-minute idle gaps break the chain
 - Subsequent command must match the failed command type and project
+- Also counts **in-session fix loops** -- a test that failed then passed inside a Claude session via its Bash tool, the common case where the whole loop never touches the shell
 - Per-project breakdown with avg, median, p90
 
 ### Recommendation Engine

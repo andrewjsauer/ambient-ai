@@ -29,8 +29,10 @@ class ResolutionChain:
     @property
     def resolved(self) -> bool:
         # Back-compat: prior API exposed `resolved: bool`. True iff the chain
-        # was closed by a matching-command success (not idle break / end of window).
-        return self.closure_reason == "matched_success"
+        # was closed by a matching-command success (shell) or an in-session
+        # fix loop (a failing test that later passed inside the session) —
+        # not by an idle break / end of window / give-up.
+        return self.closure_reason in ("matched_success", "in_session")
 
 
 @dataclass
@@ -209,6 +211,25 @@ def detect_resolution_chains(
                     chain_worst_outcome = ev_outcome
                 last_event_end = event.ts_end
 
+                # The session fixed a failing test in-session (red → green via
+                # Claude's Bash tool) — the chain is resolved even though no
+                # matching shell success ever fires.
+                if event.claude_verification_resolved:
+                    chains.append(ResolutionChain(
+                        initial_failure_ts=chain_start_ts,
+                        initial_command=chain_command,
+                        claude_session_ids=chain_session_ids,
+                        resolution_ts=event.ts_end,
+                        resolution_command="(in-session verification)",
+                        active_time_ms=chain_active_ms,
+                        wall_time_ms=event.ts_end - chain_start_ts,
+                        project=project,
+                        outcome=chain_worst_outcome,
+                        closure_reason="in_session",
+                        first_claude_prompt=chain_first_prompt,
+                    ))
+                    chain_start_ts = None
+
             elif event.type == "command":
                 chain_active_ms += _capped_contribution(event, config)
                 last_event_end = event.ts_end
@@ -247,6 +268,36 @@ def detect_resolution_chains(
                 closure_reason="end_of_window",
                 first_claude_prompt=chain_first_prompt,
             ))
+
+    # Standalone in-session resolutions: a session that fixed its own failing
+    # test with no preceding shell failure to bracket it — the common case for
+    # Claude-Code-heavy work, where the whole red→green loop lives in the
+    # session and never touches the shell. Skip sessions already absorbed by a
+    # shell-bracketed chain (above) so active time is never double-counted.
+    seen_sids = {sid for c in chains for sid in c.claude_session_ids}
+    for event in events:
+        if event.type != "claude_session" or not event.claude_verification_resolved:
+            continue
+        sid = event.claude_session_id or ""
+        if sid in seen_sids:
+            continue
+        seen_sids.add(sid)
+        chains.append(ResolutionChain(
+            initial_failure_ts=event.ts_start,
+            initial_command="(in-session test failure)",
+            claude_session_ids=[sid],
+            resolution_ts=event.ts_end,
+            resolution_command="(in-session verification)",
+            active_time_ms=_capped_contribution(event, config),
+            wall_time_ms=event.ts_end - event.ts_start,
+            project=_derive_project(event),
+            outcome=outcomes.get(sid, "productive"),
+            closure_reason="in_session",
+            first_claude_prompt=(
+                event.claude_prompts[0][:FIRST_PROMPT_MAX_LENGTH]
+                if event.claude_prompts else ""
+            ),
+        ))
 
     return chains
 

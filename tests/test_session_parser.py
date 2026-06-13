@@ -112,6 +112,53 @@ class TestParseSessionFile:
         result = parse_session_file(path)
         assert result["ran_verification"] is True
 
+    def test_verification_resolved_on_fail_then_pass(self, tmp_path):
+        """A verification that failed then later passed (in-session red→green
+        fix loop) sets verification_resolved — the signal velocity uses."""
+        def bash(tid, ts):
+            return {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "pytest"}}]},
+                "timestamp": ts, "uuid": tid, "sessionId": "s", "cwd": "/projects/test"}
+
+        def result(tid, is_error, ts):
+            return {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tid, "is_error": is_error, "content": "x"}]},
+                "timestamp": ts, "uuid": "r" + tid, "sessionId": "s", "cwd": "/projects/test"}
+
+        path = tmp_path / "sess.jsonl"
+        _write_jsonl(path, [
+            _user_prompt("the test is failing"),
+            bash("t1", "2026-04-08T10:00:10Z"),
+            result("t1", True, "2026-04-08T10:00:20Z"),     # red
+            _assistant_tool_use("Edit", {"file_path": "/src/x.py", "old_string": "a", "new_string": "b"}),
+            bash("t2", "2026-04-08T10:01:00Z"),
+            result("t2", False, "2026-04-08T10:01:10Z"),    # green
+        ])
+        result_data = parse_session_file(path)
+        assert result_data["verification_resolved"] is True
+
+    def test_verification_resolved_false_when_pass_only(self, tmp_path):
+        """A test that passed without ever failing is not a fix loop."""
+        def bash(tid, ts):
+            return {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "pytest"}}]},
+                "timestamp": ts, "uuid": tid, "sessionId": "s", "cwd": "/projects/test"}
+
+        def result(tid, is_error, ts):
+            return {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tid, "is_error": is_error, "content": "x"}]},
+                "timestamp": ts, "uuid": "r" + tid, "sessionId": "s", "cwd": "/projects/test"}
+
+        path = tmp_path / "sess.jsonl"
+        _write_jsonl(path, [
+            _user_prompt("run the tests"),
+            bash("t1", "2026-04-08T10:00:10Z"),
+            result("t1", False, "2026-04-08T10:00:20Z"),
+        ])
+        result_data = parse_session_file(path)
+        assert result_data["ran_verification"] is True
+        assert result_data["verification_resolved"] is False
+
     def test_ran_verification_false_without_test_command(self, tmp_path):
         """Editing and running a non-verification command does not count."""
         path = tmp_path / "sess.jsonl"

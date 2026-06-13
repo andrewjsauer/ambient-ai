@@ -69,6 +69,44 @@ class TestDetectResolutionChains:
         # Active time = failed cmd (5s) + session (300s) + success cmd (5s)
         assert chains[0].active_time_ms == 5000 + 300_000 + 5000
 
+    def test_in_session_resolution_standalone(self):
+        """A session that fixed its own failing test (red→green via Bash),
+        with no shell fail/success to bracket it, is a resolved chain — the
+        common Claude-Code workflow the shell-only detector missed."""
+        sess = _session(ts_start=10000, duration_ms=600_000, session_id="s1")
+        sess.claude_verification_resolved = True
+        chains = detect_resolution_chains([sess], _config())
+        assert len(chains) == 1
+        assert chains[0].resolved is True
+        assert chains[0].closure_reason == "in_session"
+        assert "s1" in chains[0].claude_session_ids
+
+    def test_in_session_resolution_closes_open_shell_chain(self):
+        """Shell fail → session that resolves in-session → chain resolved even
+        with no matching shell success."""
+        fail = _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=5000)
+        sess = _session(ts_start=10000, duration_ms=300_000, session_id="s1")
+        sess.claude_verification_resolved = True
+        chains = detect_resolution_chains([fail, sess], _config())
+        resolved = [c for c in chains if c.resolved]
+        assert len(resolved) == 1
+        assert resolved[0].closure_reason == "in_session"
+        # The session is not also double-counted as a standalone chain.
+        assert len(chains) == 1
+
+    def test_in_session_no_double_count_when_shell_resolves(self):
+        """A normal shell fail→session→shell-success chain still counts once,
+        even if the session also resolved in-session."""
+        sess = _session(ts_start=10000, duration_ms=300_000, session_id="s1")
+        sess.claude_verification_resolved = True
+        events = [
+            _cmd("pytest", exit_code=1, ts_start=1000, duration_ms=5000),
+            sess,
+            _cmd("pytest", exit_code=0, ts_start=320000, duration_ms=5000),
+        ]
+        chains = detect_resolution_chains(events, _config())
+        assert len([c for c in chains if c.resolved]) == 1
+
     def test_multiple_projects(self):
         """Chains across 2 projects → separate chains."""
         events = [

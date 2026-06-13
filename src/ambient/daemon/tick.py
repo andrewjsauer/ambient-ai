@@ -114,6 +114,7 @@ def _ingest_claude_sessions(config: Config, state: DaemonState) -> None:
             "claude_prompt_count": parsed["prompt_count"],
             "claude_is_error_count": parsed["is_error_count"],
             "claude_ran_verification": parsed["ran_verification"],
+            "claude_verification_resolved": parsed["verification_resolved"],
         }
 
         date_str = datetime.fromtimestamp(parsed["end_ts"] / 1000).strftime("%Y-%m-%d")

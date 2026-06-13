@@ -31,6 +31,7 @@ class Event:
     claude_prompt_count: int | None = None
     claude_is_error_count: int | None = None
     claude_ran_verification: bool = False
+    claude_verification_resolved: bool = False
 
     @classmethod
     def from_dict(cls, d: dict) -> "Event":
@@ -53,6 +54,7 @@ class Event:
             claude_prompt_count=d.get("claude_prompt_count"),
             claude_is_error_count=d.get("claude_is_error_count"),
             claude_ran_verification=d.get("claude_ran_verification", False),
+            claude_verification_resolved=d.get("claude_verification_resolved", False),
         )
 
 
