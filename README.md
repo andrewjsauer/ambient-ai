@@ -2,6 +2,10 @@
 
 Passive terminal behavioral monitor and development coaching system for macOS. Captures shell commands and Claude Code conversations, runs algorithmic pattern detection, and produces daily/weekly coaching reports with actionable recommendations.
 
+![ambient insights — a coaching report showing resolution velocity, stuck patterns, and verification gaps](docs/assets/demo.svg)
+
+> The report above is generated from synthetic data (`python scripts/demo.py`) — no real session data is committed to this repo.
+
 ## What It Does
 
 Ambient AI watches two things:
