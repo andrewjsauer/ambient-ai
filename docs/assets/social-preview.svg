@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#161b22"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1280" height="8" fill="#58a6ff"/>
+
+  <!-- wordmark -->
+  <text x="80" y="150" fill="#c9d1d9" font-size="76" font-weight="700">ambient<tspan fill="#58a6ff">·</tspan>ai</text>
+  <text x="84" y="208" fill="#8b949e" font-size="30" font-weight="400">passive dev coaching for your terminal + Claude Code sessions</text>
+
+  <!-- the differentiator, as the hero line -->
+  <text x="80" y="320" fill="#c9d1d9" font-size="34" font-weight="400">It watches the full debugging loop —</text>
+  <text x="80" y="368" fill="#3fb950" font-size="34" font-weight="700">shell failure -&gt; Claude session -&gt; fix -&gt; retry -&gt; success</text>
+  <text x="80" y="416" fill="#c9d1d9" font-size="34" font-weight="400">— and measures where you actually get stuck.</text>
+
+  <!-- highlight stats strip -->
+  <g font-size="26">
+    <rect x="80"  y="486" width="330" height="86" rx="10" fill="#161b22" stroke="#30363d"/>
+    <text x="104" y="524" fill="#8b949e">Resolution velocity</text>
+    <text x="104" y="556" fill="#3fb950" font-weight="700">12.6 min avg · 7 resolved</text>
+
+    <rect x="436" y="486" width="270" height="86" rx="10" fill="#161b22" stroke="#30363d"/>
+    <text x="460" y="524" fill="#8b949e">Verification gaps</text>
+    <text x="460" y="556" fill="#d29922" font-weight="700">4/11 fixes (36%)</text>
+
+    <rect x="732" y="486" width="300" height="86" rx="10" fill="#161b22" stroke="#30363d"/>
+    <text x="756" y="524" fill="#8b949e">Top stuck pattern</text>
+    <text x="756" y="556" fill="#f85149" font-weight="700">infra · 3 episodes</text>
+  </g>
+
+  <text x="80" y="610" fill="#6e7681" font-size="22">Apache-2.0 · local-only · zero cost when idle · github.com/andrewjsauer/ambient-ai</text>
+</svg>

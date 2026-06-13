@@ -1,5 +1,9 @@
 # Ambient AI
 
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
+
 Passive terminal behavioral monitor and development coaching system for macOS. Captures shell commands and Claude Code conversations, runs algorithmic pattern detection, and produces daily/weekly coaching reports with actionable recommendations.
 
 ![ambient insights — a coaching report showing resolution velocity, stuck patterns, and verification gaps](docs/assets/demo.svg)
