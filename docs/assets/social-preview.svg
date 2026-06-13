@@ -21,7 +21,7 @@
   <g font-size="26">
     <rect x="80"  y="486" width="330" height="86" rx="10" fill="#161b22" stroke="#30363d"/>
     <text x="104" y="524" fill="#8b949e">Resolution velocity</text>
-    <text x="104" y="556" fill="#3fb950" font-weight="700">12.6 min avg · 7 resolved</text>
+    <text x="104" y="556" fill="#3fb950" font-weight="700">10.4 min avg · 7 resolved</text>
 
     <rect x="436" y="486" width="270" height="86" rx="10" fill="#161b22" stroke="#30363d"/>
     <text x="460" y="524" fill="#8b949e">Verification gaps</text>

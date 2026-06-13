@@ -10,13 +10,13 @@
 <text x="40.8" y="56" fill="#58a6ff" font-weight="bold" xml:space="preserve">ambient insights</text>
 <text x="24.0" y="100" fill="#58a6ff" font-weight="bold" xml:space="preserve">Ambient Insights — 2026-06-06 to 2026-06-13</text>
 <text x="24.0" y="144" fill="#8b949e" xml:space="preserve">Worked on:</text>
-<text x="108.0" y="144" fill="#c9d1d9" xml:space="preserve">            [infra] 48min · 3 session(s)</text>
+<text x="108.0" y="144" fill="#c9d1d9" xml:space="preserve">            [infra] 42min · 3 session(s)</text>
 <text x="24.0" y="166" fill="#8b949e" xml:space="preserve">Worked on:</text>
-<text x="108.0" y="166" fill="#c9d1d9" xml:space="preserve">            [web-app] 46min · 6 session(s)</text>
+<text x="108.0" y="166" fill="#c9d1d9" xml:space="preserve">            [web-app] 36min · 6 session(s)</text>
 <text x="24.0" y="188" fill="#8b949e" xml:space="preserve">Worked on:</text>
 <text x="108.0" y="188" fill="#c9d1d9" xml:space="preserve">            [payments-api] 29min · 3 session(s)</text>
 <text x="24.0" y="210" fill="#8b949e" xml:space="preserve">Resolution velocity:</text>
-<text x="192.0" y="210" fill="#3fb950" font-weight="bold" xml:space="preserve">  12.6 min avg (7 resolved)</text>
+<text x="192.0" y="210" fill="#3fb950" font-weight="bold" xml:space="preserve">  10.4 min avg (7 resolved)</text>
 <text x="24.0" y="232" fill="#8b949e" xml:space="preserve">Stuck episodes:</text>
 <text x="150.0" y="232" fill="#d29922" font-weight="bold" xml:space="preserve">       3</text>
 <text x="24.0" y="254" fill="#8b949e" xml:space="preserve">Thrash score:</text>
@@ -31,5 +31,5 @@
 <text x="242.4" y="342" fill="#d29922" font-weight="bold" xml:space="preserve"> 4/11 fixes (36%)</text>
 <text x="24.0" y="364" fill="#8b949e" xml:space="preserve">Top trigger prompt:</text>
 <text x="183.6" y="364" fill="#c9d1d9" xml:space="preserve">   "the state lock won't release"</text>
-<text x="24.0" y="408" fill="#f85149" font-weight="bold" xml:space="preserve">Top finding: infra — 3 stuck episodes (48 min total)</text>
+<text x="24.0" y="408" fill="#f85149" font-weight="bold" xml:space="preserve">Top finding: infra — 3 stuck episodes (42 min total)</text>
 </svg>

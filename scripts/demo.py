@@ -72,24 +72,29 @@ def make_projects(root: Path) -> dict:
     return paths
 
 
+GAP = 5 * MIN_MS  # idle gap between activities — enough for a pause, not a ghost vector
+
+
 def _chain(ev, t, project, test_cmd, prompts, active_min):
     """fail -> multi-turn Claude session (with an Edit) -> passing test soon
     after, so the fix is both a resolved velocity chain and a *verified* fix.
     `active_min` is the Claude session length (the bulk of active debugging
     time); the verifying test fires 90s after the session ends, inside the
-    5-min verification window."""
+    5-min verification window. Returns the timestamp just after the chain."""
     sess_dur = active_min * MIN_MS
     ev.append(_cmd(t, test_cmd, project, exit_code=1))
     ev.append(_session(t + 30_000, project, prompts, ["Read", "Edit", "Bash"],
                        [f"{test_cmd.split()[0]}_target.py"], duration_ms=sess_dur))
-    ev.append(_cmd(t + 30_000 + sess_dur + 90_000, test_cmd, project, exit_code=0))
+    end = t + 30_000 + sess_dur + 90_000
+    ev.append(_cmd(end, test_cmd, project, exit_code=0))
+    return end + 4_000
 
 
 def synthetic_events(now_ms, proj):
-    """A believable two-day slice: resolved debugging loops, one stuck project,
-    repeated prompts, and a repeated git sequence."""
+    """A believable afternoon: resolved debugging loops, one stuck project,
+    repeated prompts, and a repeated git sequence — packed into a few hours so
+    the time-ordered views (vectors, rhythm) stay realistic."""
     ev = []
-    # Seven fail -> Claude -> verified-success chains across three projects.
     chains = [
         (proj["payments-api"], "pytest", ["fix the failing charge-refund test",
             "still red on the partial-refund case", "good, add a regression test"], 14),
@@ -98,51 +103,58 @@ def synthetic_events(now_ms, proj):
         (proj["payments-api"], "pytest", ["rounding is off on invoice totals",
             "use banker's rounding", "confirm the cents add up"], 6),
         (proj["web-app"], "npm test", ["the checkout button fires twice",
-            "debounce or disable on submit", "disable then re-enable on settle"], 22),
+            "debounce or disable on submit", "disable then re-enable on settle"], 12),
         (proj["web-app"], "npm test", ["cart total wrong after coupon removal",
             "recompute from line items", "memo the selector"], 11),
         (proj["data-pipeline"], "pytest", ["dedupe the nightly ingest rows",
-            "dupes come from the retry path", "key on event id not timestamp"], 18),
+            "dupes come from the retry path", "key on event id not timestamp"], 13),
         (proj["data-pipeline"], "pytest", ["null dates crash the loader",
             "coerce to epoch or skip", "skip and log the row"], 7),
     ]
-    t = now_ms - DAY_MS
+    # One running cursor through the afternoon.
+    t = now_ms - 5 * 60 * MIN_MS
     for project, test_cmd, prompts, active_min in chains:
-        _chain(ev, t, project, test_cmd, prompts, active_min)
-        t += 90 * MIN_MS
+        t = _chain(ev, t, project, test_cmd, prompts, active_min) + GAP
 
-    # One project that keeps getting stuck: three high-thrash, no-fix sessions
+    # A project that keeps getting stuck: three high-thrash, no-fix sessions
     # (no Edit -> abandoned, and terraform has no test target).
-    t = now_ms - 6 * 60 * MIN_MS
     for _ in range(3):
         ev.append(_cmd(t, "terraform apply", proj["infra"], exit_code=1))
+        sess_dur = 14 * MIN_MS
         ev.append(_session(
             t + 20_000, proj["infra"],
             ["the state lock won't release", "still locked, what now",
              "is force-unlock safe here", "ok try force-unlock"],
             ["Read", "Grep", "Bash"], ["main.tf"],
-            duration_ms=16 * MIN_MS, error_count=5,
+            duration_ms=sess_dur, error_count=5,
         ))
-        t += 40 * MIN_MS
+        t += 20_000 + sess_dur + GAP
 
-    # Three linter-loop fixes with no follow-up test -> real verification gaps
+    # Four linter-loop fixes with no follow-up test -> real verification gaps
     # AND a repeated prompt (skill candidate).
-    t = now_ms - 5 * 60 * MIN_MS
     for _ in range(4):
         ev.append(_session(t, proj["web-app"],
                           ["run the linter and fix everything"], ["Bash", "Edit"], ["app.tsx"],
                           duration_ms=3 * MIN_MS))
-        t += 25 * MIN_MS
+        t += 3 * MIN_MS + GAP
 
     # A repeated command sequence (alias candidate).
-    t = now_ms - 3 * 60 * MIN_MS
     for _ in range(4):
         for c in ("git add -A", "git commit -m wip", "git push"):
             ev.append(_cmd(t, c, proj["web-app"]))
             t += 30_000
-        t += 10 * MIN_MS
+        t += 2 * MIN_MS
 
     ev.sort(key=lambda e: e["ts_start"])
+    # Give commands a spread of pre-command idle gaps so the GMM pause
+    # classifier has a real routine/evaluating/stuck distribution to fit.
+    pause_cycle = [2000, 1800, 1500, 22000, 2400, 1900, 75000, 2100,
+                   9000, 2000, 3500, 180000, 1700, 30000, 2200, 5000]
+    gi = 0
+    for e in ev:
+        if e["type"] == "command":
+            e["gap_ms"] = pause_cycle[gi % len(pause_cycle)]
+            gi += 1
     return ev
 
 

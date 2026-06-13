@@ -8,7 +8,7 @@ Passive terminal behavioral monitor and development coaching system for macOS. C
 
 ![ambient insights — a coaching report showing resolution velocity, stuck patterns, and verification gaps](docs/assets/demo.svg)
 
-> The report above is generated from synthetic data (`python scripts/demo.py`) — no real session data is committed to this repo.
+> The report above is generated from synthetic data (`python scripts/demo.py`) — no real session data is committed to this repo. See [docs/EXAMPLES.md](docs/EXAMPLES.md) for example output of every command.
 
 ## What It Does
 
