@@ -23,6 +23,12 @@ It runs 17 detectors over this data and produces coaching output: daily summarie
 
 The key differentiator is **resolution velocity tracking** -- Ambient AI sees the full debugging loop (shell failure -> Claude session -> fix attempt -> shell retry -> success) and measures how fast you resolve problems, where you get stuck, and what you should change.
 
+## Why I built this
+
+I spend most of my day split between the terminal and Claude Code, and I realized I had no idea where the time actually went -- which problems ate hours, where I churned in circles, which fixes I shipped without ever re-running the tests. Editor analytics and shell history each see half the picture; the part I cared about lived in the loop *between* them: a test fails, I ask Claude, I edit, I re-run, it passes -- or I give up.
+
+Ambient AI exists to make that loop visible: to measure how fast I actually resolve problems, where I stall, and what to change -- without shipping my work off to anyone else's server. Everything stays on my machine; the only thing that ever leaves is an optional Claude summary written from already-aggregated findings (see [docs/PRIVACY.md](docs/PRIVACY.md)).
+
 ## Architecture
 
 ```
