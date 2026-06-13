@@ -156,8 +156,14 @@ def detect_verification_gaps(
         by_bucket_total[bucket] += 1
         patterns = _patterns_for_bucket(bucket, config)
 
-        verified = False
-        if patterns:
+        # A fix session that ran its own test/typecheck/build via Claude's Bash
+        # tool is verified — heavy Claude Code users run verification inside the
+        # session, not in a separate shell, so the shell-command scan below would
+        # otherwise mark every such fix as an (false) gap. Session-level signal:
+        # it does not prove the verification ran *after* the last edit, only that
+        # the session verified at all.
+        verified = bool(getattr(event, "claude_ran_verification", False))
+        if not verified and patterns:
             for cmd in command_events:
                 gap = cmd.ts_start - event.ts_end
                 if gap < 0 or gap > window_ms:

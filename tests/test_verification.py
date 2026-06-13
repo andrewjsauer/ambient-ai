@@ -101,6 +101,16 @@ class TestDetectVerificationGaps:
         assert result.total_fix_sessions == 1
         assert len(result.gaps) == 0
 
+    def test_in_session_verification_not_a_gap(self, has_tests_cwd):
+        """A fix session that ran its own test via Claude's Bash tool is
+        verified even with no follow-up shell command — the real-data case
+        that made this detector report ~100% false gaps."""
+        session = _session(ts_start=10_000, duration_ms=60_000, cwd=has_tests_cwd)
+        session.claude_ran_verification = True
+        result = detect_verification_gaps([session], _config())
+        assert result.total_fix_sessions == 1
+        assert len(result.gaps) == 0
+
     def test_unverified_fix_is_gap(self, has_tests_cwd):
         """Session with Edit, no test command within window → appears in gaps."""
         session = _session(ts_start=10_000, duration_ms=60_000, cwd=has_tests_cwd)

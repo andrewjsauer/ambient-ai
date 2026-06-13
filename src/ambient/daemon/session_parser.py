@@ -11,6 +11,25 @@ logger = logging.getLogger(__name__)
 # File path pattern for extraction from tool_use inputs
 _FILE_PATH_RE = re.compile(r'(?:^|["\s])(/[\w./-]+\.[\w]+)')
 
+# Test / typecheck / build / lint commands that, when run via Claude's Bash
+# tool, count as the session verifying its own work. Heavy Claude Code users
+# run these inside the session rather than in a separate shell, so the
+# shell-hook stream never sees them — this is what made the verification-gap
+# detector report ~100% gaps on real data. We persist only a boolean per
+# session (did it verify?), never the command text.
+_VERIFICATION_CMD_RE = re.compile(
+    r"\b("
+    r"pytest|tox|nox|"
+    r"(?:npm|yarn|pnpm|bun)\s+(?:run\s+)?(?:test|build|typecheck|type-check|lint)|"
+    r"jest|vitest|mocha|"
+    r"cargo\s+(?:test|build|check|clippy)|"
+    r"go\s+(?:test|build|vet)|"
+    r"make\s+(?:test|check|lint)|"
+    r"(?:rake|rails|bin/rails)\s+test|rspec|mix\s+test|deno\s+test|"
+    r"tsc|mypy|ruff|eslint|flake8|pyright|golangci-lint"
+    r")\b"
+)
+
 
 def parse_session_file(path: Path, skip_lines: int = 0) -> dict | None:
     """Parse a single session JSONL file, extracting prompts, tool calls, and outcomes.
@@ -27,6 +46,7 @@ def parse_session_file(path: Path, skip_lines: int = 0) -> dict | None:
     prompts: list[str] = []
     tools: list[dict] = []
     files_touched: set[str] = set()
+    ran_verification = False
     is_error_count = 0
     session_id = None
     project = None
@@ -87,7 +107,8 @@ def parse_session_file(path: Path, skip_lines: int = 0) -> dict | None:
                     is_error_count += _count_errors_in_user(d)
 
                 elif entry_type == "assistant":
-                    _extract_assistant_tools(d, tools, files_touched)
+                    if _extract_assistant_tools(d, tools, files_touched):
+                        ran_verification = True
 
     except OSError as e:
         logger.warning("Cannot read session file %s: %s", path, e)
@@ -110,6 +131,7 @@ def parse_session_file(path: Path, skip_lines: int = 0) -> dict | None:
         "prompts": prompts,
         "tools": tools,
         "files_touched": sorted(files_touched),
+        "ran_verification": ran_verification,
         "is_error_count": is_error_count,
         "prompt_count": len(prompts),
         "start_ts": start_ms,
@@ -150,16 +172,27 @@ def _extract_user_message(d: dict, prompts: list[str]):
                         prompts.append(text)
 
 
-def _extract_assistant_tools(d: dict, tools: list[dict], files_touched: set[str]):
-    """Extract tool_use blocks from an assistant message."""
+def _extract_assistant_tools(d: dict, tools: list[dict], files_touched: set[str]) -> bool:
+    """Extract tool_use blocks from an assistant message.
+
+    Returns True if any Bash tool call in this message ran a verification
+    command (test/typecheck/build/lint). The command text itself is matched
+    and discarded — only the boolean is propagated upward.
+    """
     content = d.get("message", {}).get("content", [])
     if not isinstance(content, list):
-        return
+        return False
+    ran_verification = False
     for block in content:
         if not isinstance(block, dict) or block.get("type") != "tool_use":
             continue
         name = block.get("name", "")
         inp = block.get("input", {})
+
+        if name == "Bash":
+            cmd = inp.get("command", "")
+            if isinstance(cmd, str) and _VERIFICATION_CMD_RE.search(cmd):
+                ran_verification = True
 
         # Extract file paths from common tool inputs
         tool_files = []
@@ -171,6 +204,7 @@ def _extract_assistant_tools(d: dict, tools: list[dict], files_touched: set[str]
 
         tools.append({"name": name, "files": tool_files})
         files_touched.update(tool_files)
+    return ran_verification
 
 
 def discover_session_files(projects_dir: Path) -> list[Path]:

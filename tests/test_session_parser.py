@@ -100,6 +100,29 @@ class TestParseSessionFile:
         assert result["tools"][0]["name"] == "Read"
         assert "/src/foo.py" in result["files_touched"]
 
+    def test_ran_verification_true_when_session_runs_tests(self, tmp_path):
+        """A Bash tool call running a test/build counts as in-session
+        verification — the signal the shell-hook stream can't see."""
+        path = tmp_path / "sess.jsonl"
+        _write_jsonl(path, [
+            _user_prompt("fix the charge-refund bug"),
+            _assistant_tool_use("Edit", {"file_path": "/src/billing.py", "old_string": "a", "new_string": "b"}),
+            _assistant_tool_use("Bash", {"command": "python -m pytest tests/test_billing.py -k refund"}),
+        ])
+        result = parse_session_file(path)
+        assert result["ran_verification"] is True
+
+    def test_ran_verification_false_without_test_command(self, tmp_path):
+        """Editing and running a non-verification command does not count."""
+        path = tmp_path / "sess.jsonl"
+        _write_jsonl(path, [
+            _user_prompt("rename the helper"),
+            _assistant_tool_use("Edit", {"file_path": "/src/util.py", "old_string": "a", "new_string": "b"}),
+            _assistant_tool_use("Bash", {"command": "ls -la && git status"}),
+        ])
+        result = parse_session_file(path)
+        assert result["ran_verification"] is False
+
     def test_extracts_file_paths_from_tool_inputs(self, tmp_path):
         path = tmp_path / "sess.jsonl"
         _write_jsonl(path, [

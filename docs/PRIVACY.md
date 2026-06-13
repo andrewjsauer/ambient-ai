@@ -81,7 +81,7 @@ A capture unit whose verification step does not cite at least one specific claus
 | Signal class | Status | Default | Captured fields | Privacy notes |
 |---|---|---|---|---|
 | Shell command + exit code | Enabled | On | command text, cwd, exit code, timestamps | Existing zsh-hooks capture; clauses 1, 2, 7 apply. |
-| Claude Code session metadata | Enabled | On (read of existing JSONL) | prompts, tool calls, file paths, session ids | Read-only over `~/.claude/projects/`. clauses 1, 2 apply (no clipboard, no URLs except as the user typed them in prompts). |
+| Claude Code session metadata | Enabled | On (read of existing JSONL) | prompts, tool calls, file paths, session ids, ran-verification boolean | Read-only over `~/.claude/projects/`. clauses 1, 2 apply (no clipboard, no URLs except as the user typed them in prompts). The ran-verification field is a single boolean derived from whether a session ran a test/build/lint command via the Bash tool — the command text is matched and discarded, never stored. |
 | Pause / idle gaps | Enabled | On | gap durations between commands | Derived; no new payload. |
 | App-activation events (NSWorkspace) | Phase 2 Unit 7 | **Opt-in (off by default)** | bundle id, localized app name, PID, timestamp | clauses 6, 7. **Never** window title, document path, or any field named in Section 2's closed-doors table. |
 | tmux pane/window focus | Phase 2 Unit 8 | **Opt-in (off by default)** | hook name, pane id, window index, session name, timestamp | clause 7. **Never** `pane_current_command`, `pane_current_path`, or `pane_title`. |
