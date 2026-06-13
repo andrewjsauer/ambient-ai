@@ -30,7 +30,8 @@ class Event:
     claude_project: str | None = None
     claude_prompt_count: int | None = None
     claude_is_error_count: int | None = None
-    claude_ran_verification: bool = False
+    claude_ran_test: bool = False
+    claude_ran_typecheck: bool = False
     claude_verification_resolved: bool = False
 
     @classmethod
@@ -53,7 +54,8 @@ class Event:
             claude_project=d.get("claude_project"),
             claude_prompt_count=d.get("claude_prompt_count"),
             claude_is_error_count=d.get("claude_is_error_count"),
-            claude_ran_verification=d.get("claude_ran_verification", False),
+            claude_ran_test=d.get("claude_ran_test", False),
+            claude_ran_typecheck=d.get("claude_ran_typecheck", False),
             claude_verification_resolved=d.get("claude_verification_resolved", False),
         )
 

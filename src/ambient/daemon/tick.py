@@ -113,7 +113,8 @@ def _ingest_claude_sessions(config: Config, state: DaemonState) -> None:
             "claude_project": parsed["project"],
             "claude_prompt_count": parsed["prompt_count"],
             "claude_is_error_count": parsed["is_error_count"],
-            "claude_ran_verification": parsed["ran_verification"],
+            "claude_ran_test": parsed["ran_test"],
+            "claude_ran_typecheck": parsed["ran_typecheck"],
             "claude_verification_resolved": parsed["verification_resolved"],
         }
 

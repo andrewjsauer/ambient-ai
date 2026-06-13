@@ -100,7 +100,7 @@ class TestParseSessionFile:
         assert result["tools"][0]["name"] == "Read"
         assert "/src/foo.py" in result["files_touched"]
 
-    def test_ran_verification_true_when_session_runs_tests(self, tmp_path):
+    def test_ran_test_true_when_session_runs_tests(self, tmp_path):
         """A Bash tool call running a test/build counts as in-session
         verification — the signal the shell-hook stream can't see."""
         path = tmp_path / "sess.jsonl"
@@ -110,7 +110,7 @@ class TestParseSessionFile:
             _assistant_tool_use("Bash", {"command": "python -m pytest tests/test_billing.py -k refund"}),
         ])
         result = parse_session_file(path)
-        assert result["ran_verification"] is True
+        assert result["ran_test"] is True
 
     def test_verification_resolved_on_fail_then_pass(self, tmp_path):
         """A verification that failed then later passed (in-session red→green
@@ -156,7 +156,7 @@ class TestParseSessionFile:
             result("t1", False, "2026-04-08T10:00:20Z"),
         ])
         result_data = parse_session_file(path)
-        assert result_data["ran_verification"] is True
+        assert result_data["ran_test"] is True
         assert result_data["verification_resolved"] is False
 
     def test_verification_resolved_false_when_fail_only(self, tmp_path):
@@ -180,10 +180,10 @@ class TestParseSessionFile:
             result("t2", True, "2026-04-08T10:01:10Z"),
         ])
         result_data = parse_session_file(path)
-        assert result_data["ran_verification"] is True
+        assert result_data["ran_test"] is True
         assert result_data["verification_resolved"] is False
 
-    def test_ran_verification_false_without_test_command(self, tmp_path):
+    def test_ran_test_false_without_test_command(self, tmp_path):
         """Editing and running a non-verification command does not count."""
         path = tmp_path / "sess.jsonl"
         _write_jsonl(path, [
@@ -192,7 +192,7 @@ class TestParseSessionFile:
             _assistant_tool_use("Bash", {"command": "ls -la && git status"}),
         ])
         result = parse_session_file(path)
-        assert result["ran_verification"] is False
+        assert result["ran_test"] is False
 
     def test_extracts_file_paths_from_tool_inputs(self, tmp_path):
         path = tmp_path / "sess.jsonl"
@@ -309,6 +309,31 @@ class TestParseSessionFile:
 
         result = parse_session_file(path)
         assert result["prompt_count"] == 1
+
+
+class TestCommandClassifier:
+    """_classify_command must match the program actually run, not a substring."""
+
+    def test_real_test_invocations(self):
+        from ambient.daemon.session_parser import _classify_command
+        for cmd in ["pytest", "python -m pytest tests/ -k refund", "poetry run pytest",
+                    "npx jest", "pnpm exec vitest", "go test ./...", "cargo test",
+                    "npm test", "npm run test:e2e", "cd app && yarn test",
+                    "FORCE_COLOR=1 pytest -q", "make test"]:
+            assert _classify_command(cmd) == "test", cmd
+
+    def test_typecheck_invocations(self):
+        from ambient.daemon.session_parser import _classify_command
+        for cmd in ["tsc --noEmit", "mypy src", "npm run build", "go build ./...",
+                    "cargo check", "npm run typecheck"]:
+            assert _classify_command(cmd) == "typecheck", cmd
+
+    def test_false_positives_return_none(self):
+        from ambient.daemon.session_parser import _classify_command
+        for cmd in ['git commit -m "fix pytest"', 'echo "run pytest"', "cat pytest.ini",
+                    "# go test", "git log --grep ruff", "make test-data", "grep mypy src/",
+                    "ruff check .", "eslint .", "cargo clippy", "ls && echo done"]:
+            assert _classify_command(cmd) is None, cmd
 
 
 class TestDiscoverSessionFiles:

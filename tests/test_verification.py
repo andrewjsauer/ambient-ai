@@ -106,10 +106,19 @@ class TestDetectVerificationGaps:
         verified even with no follow-up shell command — the real-data case
         that made this detector report ~100% false gaps."""
         session = _session(ts_start=10_000, duration_ms=60_000, cwd=has_tests_cwd)
-        session.claude_ran_verification = True
+        session.claude_ran_test = True
         result = detect_verification_gaps([session], _config())
         assert result.total_fix_sessions == 1
         assert len(result.gaps) == 0
+
+    def test_typecheck_only_does_not_verify_has_tests(self, has_tests_cwd):
+        """A has_tests project needs an in-session TEST run; a typecheck/build
+        (or lint) alone does not count as verifying the fix."""
+        session = _session(ts_start=10_000, duration_ms=60_000, cwd=has_tests_cwd)
+        session.claude_ran_typecheck = True  # but not claude_ran_test
+        result = detect_verification_gaps([session], _config())
+        assert len(result.gaps) == 1
+        assert result.gaps[0].bucket == "has_tests"
 
     def test_unverified_fix_is_gap(self, has_tests_cwd):
         """Session with Edit, no test command within window → appears in gaps."""
