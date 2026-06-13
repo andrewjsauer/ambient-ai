@@ -1,5 +1,6 @@
 # Ambient AI
 
+[![CI](https://github.com/andrewjsauer/ambient-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/andrewjsauer/ambient-ai/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
