@@ -562,3 +562,23 @@ class TestOpeningPromptsAndVagueFraming:
         findings = classify_sessions(events, config)
         stuck = group_stuck_patterns(findings.outcomes, events, config)
         assert abs(stuck.patterns[0].vague_framing_fraction - 3 / 5) < 0.001
+
+
+class TestProjectKeyBasename:
+    def test_full_path_claude_project_groups_by_basename(self):
+        """Real ingestion writes claude_project as a full cwd path; the
+        outcome's project must be the basename so stuck-pattern groups and the
+        'Top finding' line match the basenames every other detector uses."""
+        from ambient.detect.coaching import classify_session_outcome
+
+        ev = _make_session(project="/Users/dev/payments-api")
+        outcome = classify_session_outcome(ev, _config())
+        assert outcome.project == "payments-api"
+
+    def test_bare_name_claude_project_unchanged(self):
+        """Bare-name fixtures (legacy/tests) still map to themselves."""
+        from ambient.detect.coaching import classify_session_outcome
+
+        ev = _make_session(project="payments-api")
+        outcome = classify_session_outcome(ev, _config())
+        assert outcome.project == "payments-api"

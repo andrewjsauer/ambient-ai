@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from ambient.capture.reader import Event
 from ambient.config import Config
+from ambient.detect.projects import _derive_project
 
 OPENING_PROMPT_MAX_LENGTH = 140
 
@@ -154,7 +155,11 @@ def classify_session_outcome(event: Event, config: Config) -> SessionOutcome:
     error_count = event.claude_is_error_count or 0
     tools = event.claude_tools or []
     files = event.claude_files or []
-    project = event.claude_project or event.cwd or "unknown"
+    # Group by basename, consistent with projects/velocity/vectors. Real
+    # ingestion writes claude_project as a full cwd path, so the raw value
+    # made stuck-pattern groups and the "Top finding" line show full paths
+    # while every other detector showed the basename.
+    project = _derive_project(event)
     duration_ms = event.duration_ms
     session_id = event.claude_session_id or ""
 
