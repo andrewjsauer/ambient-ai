@@ -5,24 +5,23 @@
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
 
-Passive terminal behavioral monitor and development coaching system for macOS. Captures shell commands and Claude Code conversations, runs algorithmic pattern detection, and produces daily/weekly coaching reports with actionable recommendations.
+**Ambient AI watches the whole debugging loop across your terminal *and* Claude Code — and shows you where you actually get stuck.** A test fails, you ask Claude, you edit, you re-run — that loop lives half in your shell and half in your AI session, so nothing measures it end to end. Ambient stitches both surfaces together (macOS, all local) and surfaces the patterns you've stopped noticing: the prompt you retype every day, the projects that eat your afternoons, the fixes you shipped without ever re-running the tests.
 
-![ambient insights — a coaching report showing resolution velocity, stuck patterns, and verification gaps](docs/assets/demo.svg)
+![ambient insights — a coaching report showing stuck patterns, repeated prompts, verification gaps, and resolution velocity](docs/assets/demo.svg)
 
-> The report above is generated from synthetic data (`python scripts/demo.py`) — no real session data is committed to this repo. See [docs/EXAMPLES.md](docs/EXAMPLES.md) for example output of every command.
+```
+Ambient Insights — last 7 days
 
-## What It Does
+Stuck episodes:       3
+Top repeated prompt:  x4 "run the linter and fix everything"     → skill candidate
+Top command sequence: x3 git add -A → git commit -m wip → git push   → alias candidate
+Verification gaps (tests): 4/11 fixes (36%)
+Resolution velocity:  10.4 min avg (7 resolved)
 
-Ambient AI watches two things:
+Top finding: infra — 3 stuck episodes (42 min total)
+```
 
-1. **Your terminal** -- every command, exit code, and timing gap via zsh hooks
-2. **Your Claude Code sessions** -- prompts you type, tools Claude uses, errors, files touched
-
-Optionally (strictly opt-in), it also captures focus signals: macOS app activations and tmux pane focus.
-
-It runs 17 detectors over this data and produces coaching output: daily summaries, weekly trend reports, on-demand insights, and installable recommendations (skills, aliases, CLAUDE.md rules).
-
-The key differentiator is **resolution velocity tracking** -- Ambient AI sees the full debugging loop (shell failure -> Claude session -> fix attempt -> shell retry -> success) and measures how fast you resolve problems, where you get stuck, and what you should change.
+> Illustrative output, generated from **synthetic** data (`python scripts/demo.py`) — no real session data is committed to this repo. On real workflows the standout signals are usually the repeated prompts, stuck projects, and verification gaps; resolution velocity fires when you run the literal fail → fix → retry loop. See [docs/EXAMPLES.md](docs/EXAMPLES.md) for example output of every command.
 
 ## Why I built this
 
@@ -30,7 +29,22 @@ I spend most of my day split between the terminal and Claude Code, and I realize
 
 Ambient AI exists to make that loop visible: to measure how fast I actually resolve problems, where I stall, and what to change -- without shipping my work off to anyone else's server. Everything stays on my machine; the only thing that ever leaves is an optional Claude summary written from already-aggregated findings (see [docs/PRIVACY.md](docs/PRIVACY.md)).
 
-## Architecture
+## Why this is different
+
+Most developer-analytics tools see one layer of your work. The gap Ambient fills is the **local terminal ↔ AI loop** — what happens between a failing command and a passing one — which the common categories don't instrument (as of 2026):
+
+| Tool / category | Layer it sees | What it can't see |
+|---|---|---|
+| WakaTime | Editor time, per language/file | Debugging vs. authoring, or that the work moved into your AI session |
+| GitHub Copilot analytics | AI-assistant usage (acceptance rates) | Whether the AI actually helped you *resolve* the problem |
+| Jellyfish / LinearB | Git / PR cadence (team-level) | The local shell↔AI loop never reaches the PR |
+| **Ambient AI** | **The shell ↔ Claude Code loop** | — |
+
+That the loop matters at scale isn't just my hunch: a behavioral study of [11,579 real-world AI-assisted IDE sessions](https://arxiv.org/abs/2604.00436) found developers iterate and refine with AI constantly — the exact back-and-forth Ambient measures.
+
+## How it works
+
+Ambient is three stages — capture, detect, present. The detectors below are *how* it produces the stuck patterns, repeated prompts, and velocity figures shown above; they aren't the point, the coaching output is.
 
 ```
 CAPTURE ──> DETECT ──> PRESENT
@@ -74,6 +88,20 @@ CAPTURE ──> DETECT ──> PRESENT
 Mermaid diagrams of the full system live in [`docs/diagrams/`](docs/diagrams/).
 
 ## Quick Start
+
+### See it first (before you wire anything up)
+
+Want to know what Ambient will tell you about your own work? See a full coaching report — built from synthetic data — in about a minute, before touching your shell config, API key, or the daemon:
+
+```bash
+git clone https://github.com/andrewjsauer/ambient-ai.git
+cd ambient-ai
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .            # the one prerequisite — the demo imports the package
+python scripts/demo.py      # prints a synthetic `ambient insights` report
+```
+
+The demo is fully synthetic: it invents its own projects, prompts, and paths and reads nothing under `~/.ambient` or `~/.claude`. It's the fastest way to decide whether the real thing is worth setting up — which is the rest of this section.
 
 ### Prerequisites
 
@@ -127,6 +155,16 @@ The daemon ticks every 30 minutes, ingesting sessions, running detectors, and ge
 ambient daemon-status   # should show "Daemon: running"
 ambient status          # daemon health, today's activity, suggested next steps
 ```
+
+## What to expect
+
+Ambient is a passive tool that learns your patterns over time — the coaching gets better as it accumulates data. Honest timeline:
+
+- **Day 1** — Capture is live. `ambient status` confirms the daemon is running and events are landing — that's proof it's *working*, not yet a coaching report. For the actual payoff today, run `python scripts/demo.py`. No real insights yet: there isn't enough of your data.
+- **Week 1** — Daily summaries start. Once ~60 timing gaps accumulate, the pause classifier calibrates (`ambient calibrate`, or automatically) and **stuck notifications** begin firing. First recommendations appear when you repeat a prompt 5+ times.
+- **Week 2+** — The full picture: per-project trends, the weekly digest (after 2 weeks of data), and resolution-velocity figures once you've run enough fail → fix → retry loops to measure (5+ resolved chains).
+
+Thresholds live in `src/ambient/config.py` (`gmm_min_samples`, `velocity_min_chains`, `weekly_min_weeks`) — the timeline above reflects their defaults.
 
 ## CLI Commands
 
