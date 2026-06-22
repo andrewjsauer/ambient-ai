@@ -50,9 +50,23 @@ def narrate_batch(
     pause_dict = _findings_to_dict(pauses)
     project_dict = _findings_to_dict(project_allocation) if project_allocation else None
 
-    prompt = build_batch_prompt(compression_dict, pause_dict, claude_sessions, project_dict)
+    # Trim oldest claude sessions if the prompt would exceed budget (mirrors
+    # narrate_daily/narrate_weekly). The detector findings are bounded; the
+    # claude_sessions list carries verbatim prompt text and is what actually
+    # blows the budget, so drop oldest sessions until it fits.
+    sessions = list(claude_sessions) if claude_sessions else None
+    prompt = build_batch_prompt(compression_dict, pause_dict, sessions, project_dict)
+    while sessions and estimate_tokens(BATCH_SYSTEM) + estimate_tokens(prompt) > BATCH_INPUT_BUDGET:
+        logger.info(
+            "PROMPT_TRIMMED call_type=batch sessions_before=%d sessions_after=%d",
+            len(sessions), len(sessions) - 1,
+        )
+        sessions.pop(0)  # drop oldest session
+        prompt = build_batch_prompt(compression_dict, pause_dict, sessions or None, project_dict)
 
-    # Safety check: warn if batch prompt exceeds budget (unlikely for single 30-min window)
+    # If still over budget with no sessions left to drop, the detector findings
+    # themselves are oversized — warn but proceed (truncating them would distort
+    # the analysis).
     estimated = estimate_tokens(BATCH_SYSTEM) + estimate_tokens(prompt)
     if estimated > BATCH_INPUT_BUDGET:
         logger.warning(

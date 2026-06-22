@@ -191,8 +191,10 @@ class TestDaemonTick:
 
 
 class TestCursorWatermark:
-    """Cursor advance uses only command-event timestamps to avoid rewind from
-    backfilled claude_session events whose ts_start can be days old."""
+    """Cursor advances past the max ts_end of all processed events, clamped so
+    it never rewinds. The clamp absorbs backfilled claude_session events whose
+    ts_end can be days old, while still advancing past recent session-only ticks
+    so the same window is never re-analyzed twice."""
 
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
     @patch("ambient.daemon.tick._run_analysis")
@@ -232,8 +234,39 @@ class TestCursorWatermark:
         ])
         daemon_tick(config)
         reloaded = DaemonState.load(config.state_path)
-        # Cursor must not rewind to ancient session ts
+        # Cursor must not rewind to ancient session ts (clamp holds the line)
         assert reloaded.last_analyzed_ts == prior_cursor
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("ambient.daemon.tick._run_analysis")
+    def test_cursor_advances_past_recent_claude_sessions(self, mock_analysis, config):
+        """Regression: a tick processing only RECENT claude_session events (no
+        commands) must advance the cursor past them so they are not re-analyzed
+        on the next tick. Pre-fix the command-only watermark froze the cursor,
+        re-feeding the same ~167k-token window to the model every 30 minutes —
+        a recurring uncached cost loop that quietly bled the API key."""
+        mock_analysis.return_value = {"analysis": {}}
+        today = datetime.now().strftime("%Y-%m-%d")
+        now_ms = int(datetime.now().timestamp() * 1000)
+
+        # Session completed an hour ago — after the prior cursor (2h ago).
+        prior_cursor = now_ms - 7_200_000
+        state = DaemonState(last_analyzed_ts=prior_cursor)
+        state.save(config.state_path)
+        sess_start = now_ms - 3_600_000
+        _write_events(config, today, [
+            _make_claude_session_event(sess_start, session_id="recent-1", duration_ms=60_000),
+        ])
+
+        # Tick 1 analyzes the session and advances the cursor past its ts_end.
+        daemon_tick(config)
+        assert mock_analysis.call_count == 1
+        cursor = DaemonState.load(config.state_path).last_analyzed_ts
+        assert cursor == (sess_start + 60_000) + 1
+
+        # Tick 2 finds nothing new — the session is not re-analyzed.
+        daemon_tick(config)
+        assert mock_analysis.call_count == 1
 
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
     @patch("ambient.daemon.tick._run_analysis")

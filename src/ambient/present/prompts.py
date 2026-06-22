@@ -1,3 +1,9 @@
+# A Claude session's first prompt can be an entire pasted file. Cap it so one
+# session can't dominate the batch prompt — the batch analysis only needs the
+# gist of what the session was about, not its full text.
+_MAX_PROMPT_CHARS = 500
+
+
 BATCH_SYSTEM = """You are a behavioral analyst studying a developer's terminal workflow. You receive algorithmically-derived findings from three detection systems. All findings are pre-validated — do not speculate beyond the data. Cite specific commands and times.
 
 Respond in JSON with this structure:
@@ -58,6 +64,8 @@ def build_batch_prompt(
             duration_min = s.get("duration_ms", 0) / 1000 / 60
             prompts = s.get("claude_prompts", [])
             first_prompt = prompts[0] if prompts else "(no prompt)"
+            if len(first_prompt) > _MAX_PROMPT_CHARS:
+                first_prompt = first_prompt[:_MAX_PROMPT_CHARS] + "…"
             project = s.get("claude_project", "unknown")
             sections.append(
                 f"  Session: {duration_min:.0f}min | "
