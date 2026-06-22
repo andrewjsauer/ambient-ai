@@ -10,7 +10,10 @@ from ambient.present.narrator import (
     narrate_batch, narrate_daily, narrate_weekly, load_batch_analyses,
     DAILY_INPUT_BUDGET, WEEKLY_INPUT_BUDGET,
 )
-from ambient.present.prompts import build_batch_prompt, build_daily_prompt, DAILY_SYSTEM
+from ambient.present.prompts import (
+    build_batch_prompt, build_daily_prompt, BATCH_SYSTEM, DAILY_SYSTEM,
+)
+from ambient.present.tokens import estimate_tokens
 
 
 @pytest.fixture
@@ -75,6 +78,42 @@ def test_batch_prompt_without_pauses():
     )
     assert "Not available" in prompt
     assert "None found" in prompt
+
+
+def test_batch_prompt_truncates_long_session_prompt():
+    """A Claude session's first prompt can be a whole pasted file; the batch
+    prompt must cap it so one session can't dominate the call."""
+    long_prompt = "y" * 5000
+    prompt = build_batch_prompt(
+        {"sequences": [], "compression_ratio": 1.0},
+        {"available": False},
+        claude_sessions=[{
+            "duration_ms": 60000, "claude_prompt_count": 1,
+            "claude_project": "p", "claude_prompts": [long_prompt],
+        }],
+    )
+    assert long_prompt not in prompt
+    assert "…" in prompt
+
+
+@patch("ambient.present.narrator._call_api")
+def test_narrate_batch_trims_sessions_when_over_budget(mock_api, config):
+    """Regression: an oversized claude_sessions list is trimmed to fit the batch
+    budget instead of being sent verbatim — the root of the 167k-token, uncached
+    re-analysis that bled the API key."""
+    mock_api.return_value = json.dumps({"work_phase": {}})
+    sessions = [
+        {"duration_ms": 60000, "claude_prompt_count": 1, "claude_project": "p",
+         "claude_prompts": ["x" * 5000]}
+        for _ in range(50)
+    ]
+    with patch("ambient.present.narrator.BATCH_INPUT_BUDGET", 2000):
+        narrate_batch(_sample_compression(), _sample_pauses(), config,
+                      claude_sessions=sessions)
+
+    # The prompt actually sent must be within budget (positional arg 2).
+    sent_prompt = mock_api.call_args[0][2]
+    assert estimate_tokens(BATCH_SYSTEM) + estimate_tokens(sent_prompt) <= 2000
 
 
 def test_daily_system_has_structured_template():

@@ -464,19 +464,17 @@ def daemon_tick(config: Config) -> None:
             # Watermark on ts_end, not ts_start: events are written at command
             # completion, so a command still running at tick time lands later
             # with an old ts_start — a ts_start watermark skipped it forever.
-            # Use only command events to compute the watermark: backfilled
-            # claude_session events carry timestamps from days ago, which would
-            # rewind the cursor. The processed_sessions map already prevents
-            # re-ingestion of those sessions on future ticks.
-            command_ts = [e.ts_end for e in events if e.type == "command"]
-            if command_ts:
-                latest_ts = max(command_ts)
-                state.last_analyzed_ts = latest_ts + 1
-            else:
-                logger.debug(
-                    "Cursor unchanged: tick processed %d non-command events only",
-                    len(events),
-                )
+            #
+            # Advance past the max ts_end of ALL processed events, clamped so the
+            # cursor never rewinds (max with the current value). The clamp is what
+            # makes including claude_session events safe: a backfilled session
+            # carries an old ts_end and on its own would rewind the cursor, but
+            # max() holds the line. The prior command-only watermark froze the
+            # cursor whenever a tick processed only session events — so the same
+            # window re-fed the model every 30-min tick, an unbounded uncached
+            # re-analysis loop (the same ~167k-token call, forever).
+            latest_ts = max(e.ts_end for e in events)
+            state.last_analyzed_ts = max(state.last_analyzed_ts, latest_ts + 1)
             state.events_since_calibration += len(events)
 
             # Save state immediately after cursor update
